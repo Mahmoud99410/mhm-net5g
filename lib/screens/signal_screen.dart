@@ -1,7 +1,10 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
+import '../core/format.dart';
 import '../core/xml_utils.dart';
 import '../widgets/advice_card.dart';
 import '../widgets/common.dart';
@@ -16,7 +19,7 @@ class SignalScreen extends StatefulWidget {
 class _SignalScreenState extends State<SignalScreen> {
   String? mode;
   Set<int>? bands;
-  Set<int> scanBands = {1, 3, 7, 8, 20};
+  Set<String>? optSel;
   bool scanSpeed = true;
   bool busy = false;
 
@@ -28,8 +31,6 @@ class _SignalScreenState extends State<SignalScreen> {
     mode ??= curMode;
     bands ??= s.lockedLteBands.toSet();
     final supported = s.supportedLteBands;
-    scanBands = scanBands.where(supported.contains).toSet();
-    if (scanBands.isEmpty) scanBands = supported.take(5).toSet();
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -289,61 +290,8 @@ class _SignalScreenState extends State<SignalScreen> {
           ]),
         ),
 
-        // ---------- best band finder ----------
-        SectionCard(
-          title: s.t('البحث عن أقوى تردد تلقائياً', 'Find the best band'),
-          icon: Icons.auto_awesome_rounded,
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            NoteBox(s.t(
-                'التطبيق يجرب كل باند لوحده، يقيس الإشارة (والسرعة إذا فعّلتها)، ثم يرجع إعداداتك الأصلية ويعرض الأفضل. الإنترنت سينقطع لثوانٍ عند كل تجربة. المدة تقريباً 30–45 ثانية لكل باند.',
-                'Each band is tested alone (signal + optional speed), then your settings are restored. Internet drops briefly per band.')),
-            Wrap(spacing: 8, runSpacing: 8, children: [
-              for (final b in supported)
-                FilterChip(
-                  label: Text('B$b'),
-                  selected: scanBands.contains(b),
-                  onSelected: s.scanning
-                      ? null
-                      : (v) => setState(() => v ? scanBands.add(b) : scanBands.remove(b)),
-                ),
-            ]),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              value: scanSpeed,
-              onChanged: s.scanning ? null : (v) => setState(() => scanSpeed = v),
-              title: Text(s.t('قياس السرعة أيضاً (أدق)', 'Also measure speed (more accurate)')),
-            ),
-            if (s.scanning) ...[
-              const LinearProgressIndicator(),
-              const SizedBox(height: 8),
-              Text(s.scanStatus, textAlign: TextAlign.center),
-              const SizedBox(height: 8),
-              OutlinedButton(onPressed: s.stopScan, child: Text(s.t('إيقاف', 'Stop'))),
-            ] else
-              FilledButton.icon(
-                onPressed: scanBands.isEmpty
-                    ? null
-                    : () async {
-                        final ok = await confirm(
-                            context,
-                            s.t('بدء الفحص؟', 'Start scan?'),
-                            s.t('سينقطع الإنترنت لفترات قصيرة أثناء الفحص.',
-                                'Internet will drop briefly during the scan.'));
-                        if (ok) {
-                          final list = scanBands.toList()..sort();
-                          s.scanBands(list, withSpeed: scanSpeed);
-                        }
-                      },
-                icon: const Icon(Icons.radar_rounded),
-                label: Text(s.t('ابدأ البحث', 'Start')),
-              ),
-            if (s.scanResults.isNotEmpty) ...[
-              const SizedBox(height: 14),
-              for (var i = 0; i < s.scanResults.length; i++)
-                _resultTile(s, s.scanResults[i], i == 0 && !s.scanning),
-            ],
-          ]),
-        ),
+        // ---------- optimizer ----------
+        _optimizerCard(s),
 
         // ---------- raw ----------
         SectionCard(
@@ -397,7 +345,119 @@ class _SignalScreenState extends State<SignalScreen> {
               style: const TextStyle(color: AppColors.cyan, fontWeight: FontWeight.w700)),
         );
 
-  Widget _resultTile(AppState s, BandScanResult r, bool best) {
+  Widget _optimizerCard(AppState s) {
+    final cfgs = s.optConfigs;
+    optSel ??= cfgs.where((c) => c.id == 'auto' || c.id == '4g' || c.id == 'b1' || c.id == 'b3' || c.id == 'b8' || c.id == 'b20').map((c) => c.id).toSet();
+    final best = s.optBest;
+    final base = s.optBaseline;
+    final done = s.optResults.where((r) => r.ok).toList();
+    return SectionCard(
+      title: s.t('محسّن الشبكة الذكي', 'Smart network optimizer'),
+      icon: Icons.auto_awesome_rounded,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        NoteBox(
+          s.t('يتنقل التطبيق بين أنواع الشبكة والترددات واحداً واحداً، ويقيس الإشارة والسرعة الفعلية لكل واحد، ثم يرسمها لك ويرجع إعداداتك كما كانت. بعدها تختار: تفعيل الأفضل، أو إبقاء الحالي، أو الوضع الافتراضي. الإنترنت سينقطع لثوانٍ عند كل تجربة (حوالي 25 ثانية لكل خيار).',
+              'Tries each mode/band, measures signal and real speed, charts them and restores your settings. Then you choose.'),
+          color: AppColors.blue,
+        ),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          for (final c in cfgs)
+            FilterChip(
+              label: Text(s.t(c.labelAr, c.labelEn), style: const TextStyle(fontSize: 12)),
+              selected: optSel!.contains(c.id),
+              onSelected: s.scanning
+                  ? null
+                  : (v) => setState(() => v ? optSel!.add(c.id) : optSel!.remove(c.id)),
+            ),
+        ]),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: scanSpeed,
+          onChanged: s.scanning ? null : (v) => setState(() => scanSpeed = v),
+          title: Text(s.t('قياس السرعة الفعلية لكل خيار', 'Measure real speed for each')),
+        ),
+        if (s.scanning) ...[
+          const LinearProgressIndicator(),
+          const SizedBox(height: 8),
+          Text(s.scanStatus, textAlign: TextAlign.center),
+          const SizedBox(height: 8),
+          OutlinedButton(onPressed: s.stopScan, child: Text(s.t('إيقاف', 'Stop'))),
+        ] else
+          FilledButton.icon(
+            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+            onPressed: optSel!.isEmpty
+                ? null
+                : () async {
+                    final ok = await confirm(
+                        context,
+                        s.t('بدء التحسين؟', 'Start?'),
+                        s.t('المدة تقريباً ${optSel!.length * 25 ~/ 60 + 1} دقيقة، وسينقطع الإنترنت لفترات قصيرة.',
+                            'About ${optSel!.length * 25 ~/ 60 + 1} min; internet drops briefly.'));
+                    if (!ok) return;
+                    final list = cfgs.where((c) => optSel!.contains(c.id)).toList();
+                    // always measure the default first as the reference
+                    list.sort((a, b) => a.id == 'auto' ? -1 : (b.id == 'auto' ? 1 : 0));
+                    s.optimize(list, withSpeed: scanSpeed);
+                  },
+            icon: const Icon(Icons.rocket_launch_rounded),
+            label: Text(s.t('ابدأ البحث عن أفضل إعداد', 'Find the best setup')),
+          ),
+        if (done.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text(scanSpeed ? s.t('السرعة لكل خيار (${s.unit})', 'Speed per option (${s.unit})') : s.t('نقاء الإشارة لكل خيار (dB)', 'SINR per option'),
+              style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          BarChart(
+            labels: [for (final r in done) r.cfg.id == 'auto' ? 'Auto' : (r.cfg.id == '4g' ? '4G' : r.cfg.id.toUpperCase())],
+            values: [
+              for (final r in done)
+                scanSpeed ? rateValue(mbpsToBytes(r.mbps)) : math.max(0.0, (r.has5g ? r.nrSinr : r.sinr) + 10)
+            ],
+            fmt: (v) => scanSpeed ? '${v.toStringAsFixed(1)} ${s.unit}' : '${(v - 10).toStringAsFixed(0)} dB',
+            height: 160,
+          ),
+          const SizedBox(height: 12),
+          for (final r in done) _optTile(s, r, identical(r, best)),
+          if (!s.scanning && best != null) ...[
+            const SizedBox(height: 8),
+            if (base != null && base.ok && scanSpeed && best.mbps > 0)
+              NoteBox(
+                best.cfg.id == 'auto'
+                    ? s.t('الوضع الافتراضي (تلقائي) هو الأفضل عندك — لا تحتاج لتغيير شيء.',
+                        'Default (Auto) is already the best.')
+                    : s.t('أفضل خيار: ${best.cfg.labelAr} — أسرع من الافتراضي بنسبة ${base.mbps > 0 ? ((best.mbps / base.mbps - 1) * 100).toStringAsFixed(0) : '?'}%.',
+                        'Best: ${best.cfg.labelEn}'),
+                color: AppColors.green,
+                icon: Icons.emoji_events_rounded,
+              ),
+            FilledButton.icon(
+              onPressed: busy ? null : () => _run(s, () => s.applyOpt(best)),
+              icon: const Icon(Icons.check_circle_rounded),
+              label: Text(s.t('تفعيل الأفضل (${best.cfg.labelAr})', 'Activate best')),
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => toast(context, s.t('تم إبقاء إعداداتك الحالية', 'Kept current settings')),
+                  child: Text(s.t('إبقاء الحالي', 'Keep current')),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: busy ? null : () => _run(s, s.resetNetworkDefault),
+                  child: Text(s.t('الوضع الافتراضي', 'Default')),
+                ),
+              ),
+            ]),
+          ],
+        ],
+      ]),
+    );
+  }
+
+  Widget _optTile(AppState s, OptResult r, bool best) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
@@ -407,29 +467,49 @@ class _SignalScreenState extends State<SignalScreen> {
         border: Border.all(color: best ? AppColors.green : AppColors.border),
       ),
       child: Row(children: [
-        if (best) const Icon(Icons.emoji_events_rounded, color: AppColors.green),
-        if (best) const SizedBox(width: 8),
+        Icon(best ? Icons.emoji_events_rounded : Icons.tune_rounded,
+            color: best ? AppColors.green : AppColors.text2),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('B${r.band}${_bandHint(r.band)}',
-                style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+            Text(s.t(r.cfg.labelAr, r.cfg.labelEn),
+                style: const TextStyle(fontWeight: FontWeight.w800)),
             Text(
-              r.ok
-                  ? 'RSRP ${r.rsrp.toStringAsFixed(0)} · SINR ${r.sinr.toStringAsFixed(0)}${r.mbps > 0 ? ' · ${r.mbps.toStringAsFixed(1)} Mbps' : ''}'
-                  : s.t('لا توجد تغطية على هذا الباند', 'No coverage on this band'),
-              style: const TextStyle(color: AppColors.text2, fontSize: 12),
+              [
+                if (r.bands.isNotEmpty) r.bands,
+                if (r.rsrp != 0) '4G ${r.rsrp.toStringAsFixed(0)}dBm/${r.sinr.toStringAsFixed(0)}dB',
+                if (r.has5g) '5G ${r.nrRsrp.toStringAsFixed(0)}dBm/${r.nrSinr.toStringAsFixed(0)}dB',
+                if (!r.has5g) s.t('بدون 5G', 'no 5G'),
+              ].join(' · '),
+              textDirection: TextDirection.ltr,
+              style: const TextStyle(color: AppColors.text2, fontSize: 11),
             ),
           ]),
         ),
-        if (r.ok)
-          TextButton(
-            onPressed: busy
-                ? null
-                : () => _apply(s, s.netMode.s('NetworkMode', '00'), [r.band]),
-            child: Text(s.t('اعتمد', 'Use')),
-          ),
+        if (r.mbps > 0)
+          Text(fmtRate(mbpsToBytes(r.mbps)),
+              style: TextStyle(
+                  fontWeight: FontWeight.w900, color: best ? AppColors.green : AppColors.cyan)),
+        IconButton(
+          tooltip: s.t('تفعيل', 'Apply'),
+          icon: const Icon(Icons.play_circle_outline_rounded),
+          onPressed: busy ? null : () => _run(s, () => s.applyOpt(r)),
+        ),
       ]),
     );
+  }
+
+  Future<void> _run(AppState s, Future<String?> Function() f) async {
+    setState(() => busy = true);
+    final err = await f();
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      mode = null;
+      bands = null;
+    });
+    toast(context, err ?? s.t('تم التطبيق ✓ — قد ينقطع الإنترنت لثوانٍ', 'Applied ✓'),
+        error: err != null);
   }
 
   Future<void> _apply(AppState s, String m, List<int>? b) async {

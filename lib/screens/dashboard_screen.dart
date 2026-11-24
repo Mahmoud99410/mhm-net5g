@@ -206,14 +206,45 @@ class DashboardScreen extends StatelessWidget {
                         Icons.bolt_rounded,
                         AppColors.amber)),
               ]),
-              if (s.testServer.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text(
-                  '${s.t('السيرفر', 'Server')}: ${s.testServer}  ·  Jitter ${s.lastJitter} ms',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: AppColors.text2, fontSize: 11),
+              const SizedBox(height: 10),
+              Row(children: [
+                const Icon(Icons.dns_rounded, size: 16, color: AppColors.text2),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    s.testServer.isEmpty
+                        ? s.t('السيرفر: تلقائي (الأقرب والأسرع)', 'Server: automatic')
+                        : '${s.testServer}  ·  Jitter ${s.lastJitter} ms',
+                    style: const TextStyle(color: AppColors.text2, fontSize: 11),
+                  ),
                 ),
-              ],
+                PopupMenuButton<String>(
+                  tooltip: s.t('اختيار السيرفر', 'Choose server'),
+                  onSelected: s.setPreferredServer,
+                  itemBuilder: (_) => [
+                    PopupMenuItem(value: '', child: Text(s.t('تلقائي', 'Automatic'))),
+                    for (final sv in s.speedServers)
+                      PopupMenuItem(
+                        value: sv.base,
+                        child: Text(
+                            '${sv.name}${sv.distance >= 0 ? ' · ${sv.distance.toStringAsFixed(0)} km' : ''}'),
+                      ),
+                  ],
+                  child: Pill(
+                      s.preferredServer.isEmpty ? s.t('تلقائي', 'Auto') : s.t('مختار', 'Manual'),
+                      icon: Icons.swap_horiz_rounded,
+                      color: AppColors.blue),
+                ),
+              ]),
+              if (s.routerDuringTest > 0 && !s.testing)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    s.t('الراوتر سجّل أثناء الفحص: ${fmtRate(mbpsToBytes(s.routerDuringTest))}',
+                        'Router saw during test: ${fmtRate(mbpsToBytes(s.routerDuringTest))}'),
+                    style: const TextStyle(color: AppColors.text2, fontSize: 11),
+                  ),
+                ),
               if (s.testHistory.length > 1) ...[
                 const Divider(height: 24),
                 Text(s.t('نتائج الفحوصات السابقة (تنزيل)', 'Previous tests (download)'),

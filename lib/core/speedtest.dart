@@ -20,8 +20,11 @@ class SpeedServer {
       : Uri.parse('$base/__up?r=${_nc()}');
 
   Uri ping() => ookla
-      ? Uri.parse('$base/download?nocache=${_nc()}&size=1')
+      ? Uri.parse('$base/hello?nocache=${_nc()}')
       : Uri.parse('$base/__down?bytes=1&r=${_nc()}');
+
+  /// Distance in km reported by the server list (if known).
+  double distance = -1;
 
   static int _c = 0;
   static String _nc() => '${DateTime.now().microsecondsSinceEpoch}${_c++}';
@@ -43,16 +46,24 @@ class SpeedTester {
   final Duration upTime;
   final Duration warmup;
   SpeedTester({
-    this.streams = 6,
+    this.streams = 8,
     this.downTime = const Duration(milliseconds: 4500),
     this.upTime = const Duration(milliseconds: 3500),
     this.warmup = const Duration(milliseconds: 700),
   });
 
+  static const userAgent =
+      'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
+
   HttpClient _client() => HttpClient()
-    ..maxConnectionsPerHost = 16
+    ..maxConnectionsPerHost = 32
+    ..userAgent = userAgent
+    ..autoUncompress = false
     ..connectionTimeout = const Duration(seconds: 5)
     ..idleTimeout = const Duration(seconds: 3);
+
+  /// Extra details of the last run (shown to the user).
+  final List<String> notes = [];
 
   /// Find nearby Ookla servers (Zain Jordan preferred), fallback Cloudflare.
   Future<List<SpeedServer>> servers() async {
@@ -70,7 +81,9 @@ class SpeedTester {
         if (s is! Map) continue;
         final host = '${s['host'] ?? ''}';
         if (host.isEmpty) continue;
-        out.add(SpeedServer('${s['sponsor'] ?? ''} · ${s['name'] ?? ''}', 'https://$host'));
+        final srv = SpeedServer('${s['sponsor'] ?? ''} · ${s['name'] ?? ''}', 'https://$host');
+        srv.distance = double.tryParse('${s['distance'] ?? ''}') ?? -1;
+        out.add(srv);
       }
       // prefer the user's operator first (Zain), keep distance order otherwise
       out.sort((a, b) {
@@ -78,8 +91,12 @@ class SpeedTester {
         final zb = b.name.toLowerCase().contains('zain') ? 0 : 1;
         return za.compareTo(zb);
       });
-      if (out.isNotEmpty) return out;
-    } catch (_) {
+      if (out.isNotEmpty) {
+        notes.add('servers: ${out.length}');
+        return out;
+      }
+    } catch (e) {
+      notes.add('server list failed: $e');
     } finally {
       c.close(force: true);
     }
@@ -104,15 +121,19 @@ class SpeedTester {
   }
 
   /// Picks the server with the lowest latency among the first few.
+  /// A server whose ping endpoint fails is still usable (ping shown as unknown).
   Future<(SpeedServer, int, int)> pickServer(List<SpeedServer> list) async {
     final c = _client();
     SpeedServer? best;
     var bestPing = 1 << 30;
     var jitter = 0;
     try {
-      for (final s in list.take(2)) {
-        final p = await _pings(c, s, 3);
-        if (p.length < 2) continue;
+      for (final s in list.take(3)) {
+        final p = await _pings(c, s, 4);
+        if (p.length < 2) {
+          notes.add('ping failed: ${s.name}');
+          continue;
+        }
         final rest = p.sublist(1); // first includes TLS handshake
         final mn = rest.reduce(math.min);
         if (mn < bestPing) {
@@ -128,11 +149,17 @@ class SpeedTester {
     } finally {
       c.close(force: true);
     }
-    if (best == null) {
-      final cf = SpeedServer('Cloudflare', 'https://speed.cloudflare.com', ookla: false);
-      return (cf, -1, 0);
-    }
+    if (best == null) return (list.first, -1, 0);
     return (best, bestPing, jitter);
+  }
+
+  /// Quick 1.5 s probe to check a server really delivers data (Mbps).
+  Future<double> probe(SpeedServer s) async {
+    final t = SpeedTester(
+        streams: 4,
+        downTime: const Duration(milliseconds: 1600),
+        warmup: const Duration(milliseconds: 400));
+    return t.download(s, (_) {});
   }
 
   /// Download test. [onLive] receives live Mbps.

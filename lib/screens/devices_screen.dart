@@ -212,6 +212,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
               if (d?.iface.isNotEmpty == true) d!.iface,
               if (!online) s.t('غير متصل', 'offline'),
               if (blockedNow) s.t('محظور', 'BLOCKED'),
+              if (rule != null && rule.band != 'both') 'WiFi ${rule.band}GHz',
             ].join(' · '),
             style: TextStyle(fontSize: 11, color: blockedNow ? AppColors.red : AppColors.text2),
           ),
@@ -487,6 +488,50 @@ class _DevicesScreenState extends State<DevicesScreen> {
                       if (c.mounted && err != null) toast(context, err, error: true);
                     },
                   ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface2,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Row(children: [
+                      const Icon(Icons.wifi_rounded, color: AppColors.cyan),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(s.t('شبكة الواي فاي المسموحة لهذا الجهاز', 'Allowed WiFi band'),
+                            style: const TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    ]),
+                    const SizedBox(height: 10),
+                    SegmentedButton<String>(
+                      segments: [
+                        ButtonSegment(value: '2.4', label: Text(s.t('2.4 فقط', '2.4 only'))),
+                        ButtonSegment(value: '5', label: Text(s.t('5 فقط', '5 only'))),
+                        ButtonSegment(value: 'both', label: Text(s.t('الاثنين', 'Both'))),
+                      ],
+                      selected: {rule?.band ?? 'both'},
+                      showSelectedIcon: false,
+                      onSelectionChanged: (v) async {
+                        final err =
+                            await s.setDeviceBand(mac, v.first, name: nameCtrl.text.trim());
+                        set(() {});
+                        if (mounted) setState(() {});
+                        if (c.mounted) {
+                          toast(context, err ?? s.t('تم التطبيق ✓', 'Applied ✓'),
+                              error: err != null);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      s.t('شبكة 2.4 GHz (أبعد مدى) أو 5 GHz (أسرع). عند اختيار واحدة يمنع الراوتر الجهاز من الاتصال بالأخرى، فيتصل تلقائياً بالمسموحة. هذا خاص بالواي فاي، أما 4G/5G من البرج فهي للراوتر كله.',
+                          '2.4 GHz (range) or 5 GHz (speed). The device is blocked on the other band so it joins the allowed one.'),
+                      style: const TextStyle(color: AppColors.text2, fontSize: 12, height: 1.5),
+                    ),
+                  ]),
                 ),
                 const SizedBox(height: 8),
                 ListTile(

@@ -27,7 +27,7 @@ class AdviceCard extends StatelessWidget {
         actionLabel = s.t('فك القفل', 'Unlock bands');
         break;
       case AdviceAction.scan:
-        actionLabel = s.t('كيف؟', 'How?');
+        actionLabel = s.t('افتح المحسّن', 'Open optimizer');
         break;
       case AdviceAction.none:
         break;
@@ -72,10 +72,7 @@ class AdviceCard extends StatelessWidget {
         err = await s.applyNetMode(s.netMode.s('NetworkMode', '00'), []);
         break;
       case AdviceAction.scan:
-        toast(
-            context,
-            s.t('افتح "الإشارة والترددات" ثم "البحث عن أقوى تردد"',
-                'Open Signal & Bands → Find the best band'));
+        s.openTab(1);
         return;
       case AdviceAction.none:
         return;

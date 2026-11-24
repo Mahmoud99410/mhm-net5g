@@ -15,6 +15,7 @@ class ExtenderApi {
   String _csrfParam = '';
   String _csrfToken = '';
   bool loggedIn = false;
+  String mode = ''; // 'json' (full control) or 'ont' (web panel only)
   void Function(String)? onLog;
 
   ExtenderApi(this.host);
@@ -112,15 +113,42 @@ class ExtenderApi {
     _cookies.clear();
     final ok = await reachable();
     if (!ok) throw ApiException('net');
+    Object? jsonErr;
+    try {
+      await _jsonLogin(user, password);
+      mode = 'json';
+      loggedIn = true;
+      return;
+    } catch (e) {
+      jsonErr = e;
+      onLog?.call('EXT json login: $e');
+      if (e is ApiException && (e.code == '-5' || e.code == '-1' || e.code == '-2')) {
+        // explicit wrong-password answers from the JSON API
+        rethrow;
+      }
+    }
+    try {
+      await _ontLogin(user, password);
+      mode = 'ont';
+      loggedIn = true;
+    } catch (e) {
+      onLog?.call('EXT ont login: $e');
+      if (e is ApiException && e.code == 'badpass') rethrow;
+      throw ApiException(
+          'ext',
+          'لم أستطع الدخول بالطريقتين المعروفتين لأجهزة هواوي. استخدم "لوحة المقوي" داخل التطبيق، '
+              'وأرسل تقرير التشخيص لأضبط الدخول على جهازك. ($jsonErr)');
+    }
+  }
+
+  Future<void> _jsonLogin(String user, String password) async {
     final first = CryptoUtils.randomHex(32);
     final n = await postJson('/api/system/user_login_nonce',
         {'username': user, 'firstnonce': first});
     final serverNonce = '${n['servernonce'] ?? ''}';
     final salt = '${n['salt'] ?? ''}';
     final iter = int.tryParse('${n['iterations'] ?? 100}') ?? 100;
-    if (serverNonce.isEmpty) {
-      throw ApiException('ext', 'المقوي لا يدعم طريقة الدخول هذه — استخدم زر فتح لوحة المقوي');
-    }
+    if (serverNonce.isEmpty) throw ApiException('nojson');
     final proof = CryptoUtils.scramClientProof(
       password: password,
       saltHex: salt,
@@ -130,7 +158,35 @@ class ExtenderApi {
     );
     await postJson('/api/system/user_login_proof',
         {'clientproof': proof, 'finalnonce': serverNonce});
-    loggedIn = true;
+  }
+
+  /// Login used by Huawei EchoLife / ONT style web pages (login.cgi).
+  Future<void> _ontLogin(String user, String password) async {
+    _cookies['Cookie'] = 'body:Language:english:id=-1';
+    final tr = await _send(_c.post(Uri.parse('$base/asp/GetRandCount.asp'),
+        headers: {'Cookie': 'Cookie=body:Language:english:id=-1'}));
+    var token = tr.body.replaceAll('\ufeff', '').trim();
+    if (token.isEmpty || token.length > 128 || token.contains('<')) {
+      throw ApiException('noont', 'no ONT token');
+    }
+    final body = 'UserName=${Uri.encodeQueryComponent(user)}'
+        '&PassWord=${Uri.encodeQueryComponent(base64.encode(utf8.encode(password)))}'
+        '&Language=english&x.X_HW_Token=${Uri.encodeQueryComponent(token)}';
+    final r = await _send(_c.post(Uri.parse('$base/login.cgi'),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Cookie': 'Cookie=body:Language:english:id=-1',
+        },
+        body: body));
+    _absorb(r);
+    final sc = r.headers['set-cookie'] ?? '';
+    final text = r.body.toLowerCase();
+    if (text.contains('loginerr') || text.contains('error') && !sc.contains('sid=')) {
+      throw ApiException('badpass', 'كلمة مرور المقوي غير صحيحة');
+    }
+    if (!sc.contains('sid=') && !text.contains('index.asp')) {
+      throw ApiException('noont', 'ONT login not accepted');
+    }
   }
 
   /// WiFi radios (2.4GHz / 5GHz). Returns a list of radio maps.

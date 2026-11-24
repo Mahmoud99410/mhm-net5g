@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -48,6 +49,7 @@ class DeviceRule {
   String from; // HH:mm
   String to; // HH:mm
   List<int> days; // 1..7 (Mon..Sun)
+  String band; // 'both' | '2.4' | '5'  (which WiFi band the device may use)
 
   DeviceRule({
     required this.mac,
@@ -57,6 +59,7 @@ class DeviceRule {
     this.from = '22:00',
     this.to = '07:00',
     List<int>? days,
+    this.band = 'both',
   }) : days = days ?? [1, 2, 3, 4, 5, 6, 7];
 
   Map<String, dynamic> toJson() => {
@@ -67,6 +70,7 @@ class DeviceRule {
         'from': from,
         'to': to,
         'days': days,
+        'band': band,
       };
 
   factory DeviceRule.fromJson(Map<String, dynamic> j) => DeviceRule(
@@ -77,6 +81,7 @@ class DeviceRule {
         from: j['from'] ?? '22:00',
         to: j['to'] ?? '07:00',
         days: (j['days'] as List?)?.map((e) => e as int).toList(),
+        band: j['band'] ?? 'both',
       );
 
   int _min(String hm) {
@@ -99,16 +104,27 @@ class DeviceRule {
   bool shouldBlock(DateTime now) => blocked || inSchedule(now);
 }
 
-class BandScanResult {
-  final int band;
-  double rsrp;
-  double sinr;
-  double rsrq;
-  double mbps;
-  bool ok;
-  BandScanResult(this.band,
-      {this.rsrp = -140, this.sinr = -20, this.rsrq = -30, this.mbps = 0, this.ok = false});
-  double get score => ok ? sinr * 2 + (rsrp + 140) / 2 + mbps / 5 : -999;
+/// One network configuration tested by the optimizer.
+class OptConfig {
+  final String id;
+  final String labelAr;
+  final String labelEn;
+  final String mode; // NetworkMode code
+  final String? mask; // LTE band mask, null = all bands
+  const OptConfig(this.id, this.labelAr, this.labelEn, this.mode, this.mask);
+}
+
+class OptResult {
+  final OptConfig cfg;
+  double rsrp = 0, sinr = 0, nrRsrp = 0, nrSinr = 0;
+  double mbps = 0;
+  double upMbps = 0;
+  bool has5g = false;
+  bool ok = false;
+  String bands = '';
+  OptResult(this.cfg);
+  // speed matters most; signal quality breaks ties and favours stability
+  double get score => ok ? mbps + (has5g ? nrSinr : sinr) * 1.5 : -999;
 }
 
 enum AdviceLevel { good, info, warn, bad }
@@ -187,7 +203,6 @@ class AppState extends ChangeNotifier {
   // ----- rules -----
   Map<String, DeviceRule> rules = {};
   List<String> blockedUrls = [];
-  Set<String> _appliedBlock = {};
   bool routerSupportsPerDeviceRate = false;
 
   Timer? _fast;
@@ -207,7 +222,6 @@ class AppState extends ChangeNotifier {
   // ----- band scan -----
   bool scanning = false;
   String scanStatus = '';
-  List<BandScanResult> scanResults = [];
 
   /// Tab requested by a widget (e.g. tapping the devices counter).
   final ValueNotifier<int?> tabRequest = ValueNotifier<int?>(null);
@@ -243,6 +257,7 @@ class AppState extends ChangeNotifier {
     unit = p.getString('unit') ?? 'Mbps';
     speedUnit = unit;
     autoTestMin = p.getInt('autoTestMin') ?? 0;
+    preferredServer = p.getString('prefServer') ?? '';
     lastTestDl = p.getDouble('lastTestDl') ?? 0;
     lastTestUl = p.getDouble('lastTestUl') ?? 0;
     lastTestAt = p.getString('lastTestAt') ?? '';
@@ -429,7 +444,7 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
     // clients of the extender (if logged in)
     final extMacs = <String>{};
-    if (ext?.loggedIn == true) {
+    if (ext?.loggedIn == true && ext?.mode == 'json') {
       try {
         extHosts = await ext!.hosts();
         for (final h in extHosts) {
@@ -793,63 +808,125 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  // ================= best band scan =================
-  Future<void> scanBands(List<int> bands, {bool withSpeed = true}) async {
+  // ================= optimizer =================
+  List<OptResult> optResults = [];
+  OptResult? optBaseline;
+  String _optOrigMode = '00';
+  String _optOrigMask = '';
+
+  /// Configurations the optimizer can try.
+  List<OptConfig> get optConfigs {
+    final list = <OptConfig>[
+      const OptConfig('auto', 'تلقائي 4G+5G (الافتراضي)', 'Auto 4G+5G (default)', '00', null),
+    ];
+    if (availableModes.contains('03')) {
+      list.add(const OptConfig('4g', '4G فقط', '4G only', '03', null));
+    }
+    for (final b in supportedLteBands) {
+      list.add(OptConfig('b$b', 'تلقائي + قفل B$b', 'Auto + lock B$b', '00', lteBandMask(b)));
+    }
+    return list;
+  }
+
+  Future<void> optimize(List<OptConfig> configs, {bool withSpeed = true}) async {
     if (scanning) return;
     scanning = true;
-    scanResults = [];
-    final origMode = netMode.s('NetworkMode', '00');
-    final origMask = netMode.s('LTEBand', '7FFFFFFFFFFFFFFF');
+    optResults = [];
+    _optOrigMode = netMode.s('NetworkMode', '00');
+    _optOrigMask = netMode.s('LTEBand', '7FFFFFFFFFFFFFFF');
     notifyListeners();
     try {
-      for (final b in bands) {
+      for (var i = 0; i < configs.length; i++) {
         if (!scanning) break;
-        scanStatus = t('تجربة الباند B$b ...', 'Testing band B$b ...');
+        final c = configs[i];
+        final label = t(c.labelAr, c.labelEn);
+        scanStatus = '${i + 1}/${configs.length} · ${t('تطبيق', 'Applying')} $label';
         notifyListeners();
-        final r = BandScanResult(b);
+        final r = OptResult(c);
         try {
-          await api.setNetMode(mode: origMode, lteBand: lteBandMask(b));
-          await Future.delayed(const Duration(seconds: 20));
-          double rsrp = 0, sinr = 0, rsrq = 0;
-          int n = 0;
-          for (var i = 0; i < 3; i++) {
-            final s = await api.signal();
-            if (s.s('rsrp').isNotEmpty) {
-              rsrp += s.d('rsrp');
-              sinr += s.d('sinr');
-              rsrq += s.d('rsrq');
+          await api.setNetMode(mode: c.mode, lteBand: c.mask ?? '7FFFFFFFFFFFFFFF');
+          // wait for the modem to re-attach (and 5G to come back)
+          await Future.delayed(const Duration(seconds: 15));
+          double rsrp = 0, sinr = 0, nr = 0, nrs = 0;
+          int n = 0, n5 = 0;
+          for (var k = 0; k < 3; k++) {
+            final sg = await api.signal();
+            if (sg.s('rsrp').isNotEmpty) {
+              rsrp += sg.d('rsrp');
+              sinr += sg.d('sinr');
               n++;
             }
+            if (sg.s('nrrsrp').isNotEmpty) {
+              nr += sg.d('nrrsrp');
+              nrs += sg.d('nrsinr');
+              n5++;
+            }
+            r.bands = parseCarriers(sg.s('band')).map((e) => e.label).join('+');
             await Future.delayed(const Duration(seconds: 2));
           }
-          if (n > 0) {
-            r.rsrp = rsrp / n;
-            r.sinr = sinr / n;
-            r.rsrq = rsrq / n;
+          if (n > 0 || n5 > 0) {
             r.ok = true;
+            if (n > 0) {
+              r.rsrp = rsrp / n;
+              r.sinr = sinr / n;
+            }
+            if (n5 > 0) {
+              r.has5g = true;
+              r.nrRsrp = nr / n5;
+              r.nrSinr = nrs / n5;
+            }
             if (withSpeed) {
-              scanStatus = t('قياس السرعة على B$b ...', 'Speed test on B$b ...');
+              scanStatus = '${i + 1}/${configs.length} · ${t('قياس السرعة', 'Speed test')} $label';
               notifyListeners();
               r.mbps = await quickDownload();
             }
           }
         } catch (e) {
-          log('scan B$b: $e');
+          log('optimize ${c.id}: $e');
         }
-        scanResults.add(r);
+        if (c.id == 'auto') optBaseline = r;
+        optResults.add(r);
         notifyListeners();
       }
     } finally {
-      scanStatus = t('إرجاع الإعدادات الأصلية...', 'Restoring original settings...');
+      scanStatus = t('إرجاع إعداداتك الأصلية...', 'Restoring your settings...');
       notifyListeners();
       try {
-        await api.setNetMode(mode: origMode, lteBand: origMask);
+        await api.setNetMode(mode: _optOrigMode, lteBand: _optOrigMask);
         netMode = await api.netMode();
       } catch (_) {}
-      scanResults.sort((a, b) => b.score.compareTo(a.score));
       scanning = false;
       scanStatus = '';
       notifyListeners();
+    }
+  }
+
+  OptResult? get optBest {
+    final ok = optResults.where((r) => r.ok).toList();
+    if (ok.isEmpty) return null;
+    ok.sort((a, b) => b.score.compareTo(a.score));
+    return ok.first;
+  }
+
+  Future<String?> applyOpt(OptResult r) async {
+    try {
+      await api.setNetMode(mode: r.cfg.mode, lteBand: r.cfg.mask ?? '7FFFFFFFFFFFFFFF');
+      netMode = await api.netMode();
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
+  Future<String?> resetNetworkDefault() async {
+    try {
+      await api.setNetMode(mode: '00', lteBand: '7FFFFFFFFFFFFFFF');
+      netMode = await api.netMode();
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return e.toString();
     }
   }
 
@@ -870,39 +947,77 @@ class AppState extends ChangeNotifier {
     return enforceRules(force: true);
   }
 
+  String _appliedSig = '';
+
+  /// Builds a blacklist per SSID: fully-blocked devices on every SSID, plus
+  /// devices limited to one WiFi band are blacklisted on the other band's SSIDs.
   Future<String?> enforceRules({bool force = false}) async {
     if (!connected) return null;
     final now = DateTime.now();
-    final want = rules.values.where((r) => r.shouldBlock(now)).map((r) => r.mac).toSet();
-    if (!force && setEquals(want, _appliedBlock)) return null;
+    final full = rules.values.where((r) => r.shouldBlock(now)).map((r) => r.mac).toSet();
+    final no24 = rules.values.where((r) => r.band == '5').map((r) => r.mac).toSet();
+    final no5 = rules.values.where((r) => r.band == '2.4').map((r) => r.mac).toSet();
+    final sig = jsonEncode([
+      (full.toList()..sort()),
+      (no24.toList()..sort()),
+      (no5.toList()..sort()),
+    ]);
+    if (!force && sig == _appliedSig) return null;
     try {
-      final ssids = await api.macFilter();
-      if (ssids.isEmpty) throw ApiException('100002');
-      final macs = want.toList();
-      if (macs.length > 10) {
-        return t('الحد الأقصى 10 أجهزة محظورة', 'Max 10 blocked devices');
-      }
+      final filters = await api.macFilter();
+      if (filters.isEmpty) throw ApiException('100002');
+      List<Map<String, dynamic>> basics = [];
+      try {
+        basics = await api.wifiSsids();
+      } catch (_) {}
       final out = <Map<String, dynamic>>[];
-      for (final s in ssids) {
-        final m = Map<String, dynamic>.from(s);
-        m['WifiMacFilterStatus'] = macs.isEmpty ? '0' : '2';
+      for (var k = 0; k < filters.length; k++) {
+        final m = Map<String, dynamic>.from(filters[k]);
+        // find the band of this SSID: own fields, else matching basic entry by Index/ID/position
+        var band = _bandOf(m);
+        if (band == '?') {
+          Map<String, dynamic>? match;
+          for (final b in basics) {
+            final sameIdx = m.s('Index').isNotEmpty && b.s('Index') == m.s('Index');
+            final sameId = m.s('ID').isNotEmpty && b.s('ID') == m.s('ID');
+            if (sameIdx || sameId) match = b;
+          }
+          match ??= k < basics.length ? basics[k] : null;
+          if (match != null) band = _bandOf(match);
+        }
+        final list = <String>{
+          ...full,
+          if (band == '2.4') ...no24,
+          if (band == '5') ...no5,
+        }.toList();
+        if (list.length > 10) {
+          return t('الحد الأقصى 10 أجهزة لكل شبكة', 'Max 10 devices per network');
+        }
+        m['WifiMacFilterStatus'] = list.isEmpty ? '0' : '2';
         for (var i = 0; i < 10; i++) {
-          m['WifiMacFilterMac$i'] = i < macs.length ? macs[i] : '';
+          m['WifiMacFilterMac$i'] = i < list.length ? list[i] : '';
           if (m.containsKey('wifihostname$i')) {
-            m['wifihostname$i'] = i < macs.length ? (rules[macs[i]]?.name ?? '') : '';
+            m['wifihostname$i'] = i < list.length ? (rules[list[i]]?.name ?? '') : '';
           }
         }
         out.add(m);
       }
       await api.saveMacFilter(out);
-      _appliedBlock = want;
-      log(t('تم تحديث قائمة الحظر (${macs.length})', 'Block list updated (${macs.length})'));
+      _appliedSig = sig;
+      log(t('تم تحديث قواعد الأجهزة', 'Device rules applied'));
       notifyListeners();
       return null;
     } catch (e) {
-      log('block: $e');
+      log('rules: $e');
       return e.toString();
     }
+  }
+
+  Future<String?> setDeviceBand(String mac, String band, {String name = ''}) async {
+    final r = ruleFor(mac, name);
+    r.band = band;
+    await saveRules();
+    return enforceRules(force: true);
   }
 
   // ================= URL filter =================
@@ -973,14 +1088,18 @@ class AppState extends ChangeNotifier {
     return extenderIp.isNotEmpty ? extenderIp : '192.168.101.1';
   }
 
-  Future<String?> connectExtender(String ip, String pass) async {
+  String extenderUser = 'admin';
+
+  Future<String?> connectExtender(String ip, String pass, {String user = 'admin'}) async {
     extenderIp = ip.trim();
     extenderPass = pass;
+    extenderUser = user.trim().isEmpty ? 'admin' : user.trim();
     await saveSettings();
     ext?.dispose();
     ext = ExtenderApi(extenderIp)..onLog = log;
     try {
-      await ext!.login(pass);
+      await ext!.login(pass, user: extenderUser);
+      log('extender login ok (${ext!.mode})');
       notifyListeners();
       return null;
     } catch (e) {
@@ -989,6 +1108,77 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Finds devices on the network that serve a Huawei web panel (the extender).
+  Future<List<(String, String)>> discoverExtenders() async {
+    final ips = <String>{
+      for (final d in devices)
+        if (d.active && d.ip.isNotEmpty) d.ip,
+      '192.168.101.1',
+      if (extenderIp.isNotEmpty) extenderIp,
+    }..remove(routerIp);
+    Future<(String, String)?> probe(String ip) async {
+      final c = http.Client();
+      try {
+        final r = await c.get(Uri.parse('http://$ip/')).timeout(const Duration(seconds: 2));
+        final body = r.body.toLowerCase();
+        final server = (r.headers['server'] ?? '').toLowerCase();
+        final hit = body.contains('huawei') ||
+            body.contains('echolife') ||
+            body.contains('csrf_token') ||
+            body.contains('login.cgi') ||
+            body.contains('getrandcount') ||
+            server.contains('huawei');
+        if (!hit) return null;
+        final title = RegExp(r'<title>([^<]*)</title>', caseSensitive: false)
+                .firstMatch(r.body)
+                ?.group(1)
+                ?.trim() ??
+            'Huawei';
+        return (ip, title.isEmpty ? 'Huawei' : title);
+      } catch (_) {
+        return null;
+      } finally {
+        c.close();
+      }
+    }
+
+    final res = await Future.wait(ips.map(probe));
+    final found = res.whereType<(String, String)>().toList();
+    log('discover: ${found.map((e) => e.$1).join(', ')}');
+    return found;
+  }
+
+  // ================= WiFi channel planning =================
+  /// Channels the router reports (key -> value), if any.
+  Future<Map<String, String>> routerChannels() async {
+    final out = <String, String>{};
+    for (final p in ['wlan/multi-basic-settings', 'wlan/basic-settings', 'wlan/wifiprofile']) {
+      try {
+        final raw = await api.getRaw(p);
+        for (final m in RegExp(r'<(\w*[Cc]hannel\w*)>([^<]*)</').allMatches(raw)) {
+          out['${p.split('/').last}.${m.group(1)}'] = m.group(2)!;
+        }
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  /// Suggested extender channels that do not overlap with the router's.
+  (String, String) suggestExtenderChannels(Map<String, String> routerCh) {
+    final nums = routerCh.values.map((v) => int.tryParse(v) ?? 0).where((v) => v > 0).toList();
+    final r24 = nums.where((v) => v <= 14).toList();
+    final r5 = nums.where((v) => v > 14).toList();
+    String ch24 = '11';
+    if (r24.isNotEmpty) {
+      final rc = r24.first;
+      // pick the 1/6/11 channel farthest from the router channel
+      final opts = [1, 6, 11]..sort((a, b) => (b - rc).abs().compareTo((a - rc).abs()));
+      ch24 = '${opts.first}';
+    }
+    String ch5 = '149';
+    if (r5.isNotEmpty && r5.first >= 100) ch5 = '36';
+    return (ch24, ch5);
+  }
 
   // ================= units =================
   void setUnit(String u) {
@@ -1012,19 +1202,47 @@ class AppState extends ChangeNotifier {
   SpeedServer? _server;
   DateTime? _serverAt;
 
-  Future<SpeedServer> _bestServer(SpeedTester t) async {
-    if (_server != null &&
+  List<SpeedServer> speedServers = [];
+  String preferredServer = ''; // base url chosen by the user ('' = automatic)
+  double routerDuringTest = 0; // Mbps seen by the router during the download phase
+  List<String> testNotes = [];
+
+  Future<SpeedServer> _bestServer(SpeedTester t, {bool force = false}) async {
+    if (speedServers.isEmpty || force) {
+      speedServers = await t.servers();
+    }
+    if (preferredServer.isNotEmpty) {
+      for (final s in speedServers) {
+        if (s.base == preferredServer) return s;
+      }
+    }
+    if (!force &&
+        _server != null &&
         _serverAt != null &&
         DateTime.now().difference(_serverAt!).inMinutes < 30) {
       return _server!;
     }
-    final list = await t.servers();
-    final (srv, ping, jit) = await t.pickServer(list);
-    _server = srv;
+    // probe the first two candidates and keep the one that really delivers more
+    SpeedServer best = speedServers.first;
+    var bestMbps = -1.0;
+    for (final cand in speedServers.take(2)) {
+      final m = await t.probe(cand);
+      t.notes.add('probe ${cand.name}: ${m.toStringAsFixed(1)} Mbps');
+      if (m > bestMbps) {
+        bestMbps = m;
+        best = cand;
+      }
+    }
+    _server = best;
     _serverAt = DateTime.now();
-    lastPing = ping;
-    lastJitter = jit;
-    return srv;
+    return best;
+  }
+
+  Future<void> setPreferredServer(String base) async {
+    preferredServer = base;
+    _server = null;
+    await _prefs?.setString('prefServer', base);
+    notifyListeners();
   }
 
   Future<void> runSpeedTest() async {
@@ -1032,24 +1250,27 @@ class AppState extends ChangeNotifier {
     testing = true;
     liveTest = 0;
     liveTestUl = 0;
+    routerDuringTest = 0;
     testPhase = 'ping';
     notifyListeners();
     final tester = SpeedTester();
     try {
-      final hadServer = _server != null;
       final srv = await _bestServer(tester);
-      if (hadServer) {
-        final (_, ping, jit) = await tester.pickServer([srv]);
-        lastPing = ping;
-        lastJitter = jit;
-      }
+      final (_, ping, jit) = await tester.pickServer([srv]);
+      lastPing = ping;
+      lastJitter = jit;
       testServer = srv.name;
       testPhase = 'down';
       notifyListeners();
+      final startIdx = dlHistory.length;
       lastTestDl = await tester.download(srv, (v) {
         liveTest = v;
         notifyListeners();
       });
+      final during = dlHistory.length > startIdx ? dlHistory.sublist(startIdx) : <double>[];
+      if (during.isNotEmpty) {
+        routerDuringTest = during.reduce(math.max) * 8 / 1e6;
+      }
       liveTest = lastTestDl;
       testPhase = 'up';
       notifyListeners();
@@ -1069,6 +1290,10 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       log('speedtest: $e');
     } finally {
+      testNotes = List.of(tester.notes);
+      for (final n in testNotes) {
+        log('speedtest: $n');
+      }
       testing = false;
       testPhase = '';
       notifyListeners();

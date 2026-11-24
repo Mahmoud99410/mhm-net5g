@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../api/extender_api.dart';
 import '../core/app_state.dart';
 import '../widgets/common.dart';
+import 'web_panel.dart';
 
 class ExtenderScreen extends StatefulWidget {
   const ExtenderScreen({super.key});
@@ -16,7 +16,11 @@ class ExtenderScreen extends StatefulWidget {
 class _ExtenderScreenState extends State<ExtenderScreen> {
   late final TextEditingController ip;
   late final TextEditingController pass;
+  late final TextEditingController user;
   bool busy = false;
+  bool discovering = false;
+  List<(String, String)> found = [];
+  Map<String, String> routerCh = {};
   String? error;
   List<Map<String, dynamic>> radios = [];
   Map<String, dynamic> uplink = {};
@@ -28,12 +32,16 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
     final s = context.read<AppState>();
     ip = TextEditingController(text: s.guessExtenderIp());
     pass = TextEditingController(text: s.extenderPass);
+    user = TextEditingController(text: s.extenderUser);
     if (s.ext?.loggedIn == true) _reload(s);
+    s.routerChannels().then((v) {
+      if (mounted) setState(() => routerCh = v);
+    });
   }
 
   Future<void> _reload(AppState s) async {
     final e = s.ext;
-    if (e == null) return;
+    if (e == null || e.mode != 'json') return;
     radios = await e.radios();
     uplink = await e.uplink();
     if (mounted) setState(() {});
@@ -44,7 +52,7 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
       busy = true;
       error = null;
     });
-    final err = await s.connectExtender(ip.text, pass.text);
+    final err = await s.connectExtender(ip.text, pass.text, user: user.text);
     reachable = await s.ext?.reachable();
     if (err == null) await _reload(s);
     if (!mounted) return;
@@ -73,6 +81,24 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
     if (b) return '5';
     if (a) return '2.4';
     return 'both';
+  }
+
+  Future<void> _discover(AppState s) async {
+    setState(() => discovering = true);
+    final f = await s.discoverExtenders();
+    if (!mounted) return;
+    setState(() {
+      found = f;
+      discovering = false;
+      if (f.isNotEmpty) ip.text = f.first.$1;
+    });
+    if (f.isEmpty) {
+      toast(
+          context,
+          s.t('لم أجد المقوي. تأكد أنه يعمل ومتصل بالراوتر، أو اتصل بشبكة المقوي مباشرة.',
+              'Extender not found. Make sure it is on, or join its WiFi directly.'),
+          error: true);
+    }
   }
 
   Future<void> _setMode(AppState s, String m) async {
@@ -155,12 +181,45 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
           icon: Icons.login_rounded,
           trailing: logged ? const Pill('✓', color: AppColors.green) : null,
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: ip,
+                  textDirection: TextDirection.ltr,
+                  decoration: InputDecoration(
+                    labelText: s.t('عنوان المقوي', 'Extender address'),
+                    prefixIcon: const Icon(Icons.lan_outlined),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonalIcon(
+                onPressed: discovering ? null : () => _discover(s),
+                icon: discovering
+                    ? const SizedBox(
+                        width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.travel_explore_rounded),
+                label: Text(s.t('اكتشاف', 'Find')),
+              ),
+            ]),
+            if (found.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(spacing: 6, runSpacing: 6, children: [
+                for (final f in found)
+                  ChoiceChip(
+                    label: Text('${f.$1} · ${f.$2}', style: const TextStyle(fontSize: 12)),
+                    selected: ip.text == f.$1,
+                    onSelected: (_) => setState(() => ip.text = f.$1),
+                  ),
+              ]),
+            ],
+            const SizedBox(height: 10),
             TextField(
-              controller: ip,
+              controller: user,
               textDirection: TextDirection.ltr,
               decoration: InputDecoration(
-                labelText: s.t('عنوان المقوي', 'Extender address'),
-                prefixIcon: const Icon(Icons.lan_outlined),
+                labelText: s.t('اسم المستخدم', 'Username'),
+                prefixIcon: const Icon(Icons.person_outline),
               ),
             ),
             const SizedBox(height: 10),
@@ -175,6 +234,16 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
             ),
             const SizedBox(height: 12),
             if (error != null) NoteBox(error!, color: AppColors.red),
+            if (logged && s.ext?.mode == 'ont')
+              NoteBox(
+                  s.t('تم الدخول ✓ — هذا الموديل يُدار من لوحته. اضغط "لوحة المقوي" لتتحكم بالترددات والقنوات من داخل التطبيق، وأرسل لي تقرير التشخيص لأضيف التحكم المباشر.',
+                      'Logged in. This model is managed via its panel; open it inside the app.'),
+                  color: AppColors.green,
+                  icon: Icons.check_circle_rounded),
+            NoteBox(
+                s.t('إذا فصلت الراوتر الرئيسي واتصلت بشبكة المقوي مباشرة، اضغط "اكتشاف" أو جرّب العنوان 192.168.101.1.',
+                    'If you join the extender WiFi directly, press Find or try 192.168.101.1.'),
+                color: AppColors.blue),
             if (reachable == false)
               NoteBox(s.t('المقوي لا يرد على هذا العنوان', 'Extender not reachable'),
                   color: AppColors.red),
@@ -189,9 +258,9 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: () => launchUrl(Uri.parse('http://${ip.text.trim()}/'),
-                      mode: LaunchMode.externalApplication),
-                  icon: const Icon(Icons.open_in_browser),
+                  onPressed: () => openWebPanel(
+                      context, 'http://${ip.text.trim()}/', s.t('لوحة المقوي', 'Extender panel')),
+                  icon: const Icon(Icons.web_rounded),
                   label: Text(s.t('لوحة المقوي', 'Panel')),
                 ),
               ),
@@ -199,8 +268,11 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
           ]),
         ),
 
+        // ---------- channel planner ----------
+        _channelCard(s, logged),
+
         // ---------- broadcast control ----------
-        if (logged)
+        if (logged && s.ext?.mode == 'json')
           SectionCard(
             title: s.t('ترددات البث من المقوي', 'Extender broadcast bands'),
             icon: Icons.cell_wifi_rounded,
@@ -344,6 +416,69 @@ class _ExtenderScreenState extends State<ExtenderScreen> {
       ]),
     );
   }
+
+  Widget _channelCard(AppState s, bool logged) {
+    final (c24, c5) = s.suggestExtenderChannels(routerCh);
+    final canApply = logged && s.ext?.mode == 'json' && radios.isNotEmpty;
+    return SectionCard(
+      title: s.t('منع التشويش بين الراوتر والمقوي', 'Avoid interference router ↔ extender'),
+      icon: Icons.compare_arrows_rounded,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text(
+          s.t('عندما يبث الراوتر والمقوي على نفس القناة يحدث تداخل ويبطؤ الإنترنت. الحل: قنوات غير متداخلة. في 2.4 GHz القنوات التي لا تتداخل هي 1 و 6 و 11 فقط. وفي 5 GHz نبعد المقوي عن قناة الراوتر.',
+              'Same channel = interference. On 2.4 GHz only 1, 6, 11 do not overlap; on 5 GHz keep them apart.'),
+          style: const TextStyle(color: AppColors.text2, fontSize: 12, height: 1.6),
+        ),
+        const SizedBox(height: 10),
+        if (routerCh.isNotEmpty)
+          for (final e in routerCh.entries)
+            InfoRow('${s.t('الراوتر', 'Router')} ${e.key}', e.value == '0' ? s.t('تلقائي', 'Auto') : e.value)
+        else
+          InfoRow(s.t('قناة الراوتر', 'Router channel'), s.t('تلقائي / غير معروف', 'Auto / unknown')),
+        const Divider(height: 20),
+        Row(children: [
+          Expanded(child: _chBox(s.t('اقتراح للمقوي 2.4', 'Extender 2.4'), c24, AppColors.amber)),
+          const SizedBox(width: 10),
+          Expanded(child: _chBox(s.t('اقتراح للمقوي 5', 'Extender 5'), c5, AppColors.cyan)),
+        ]),
+        const SizedBox(height: 10),
+        FilledButton.icon(
+          onPressed: !canApply || busy
+              ? null
+              : () async {
+                  setState(() => busy = true);
+                  try {
+                    for (final r in radios) {
+                      await s.ext!.setChannel(r, ExtenderApi.is5g(r) ? c5 : c24);
+                    }
+                    await _reload(s);
+                    if (mounted) toast(context, s.t('تم ضبط القنوات ✓', 'Channels set ✓'));
+                  } catch (e) {
+                    if (mounted) toast(context, e.toString(), error: true);
+                  }
+                  if (mounted) setState(() => busy = false);
+                },
+          icon: const Icon(Icons.auto_fix_high_rounded),
+          label: Text(canApply
+              ? s.t('طبّق القنوات المقترحة على المقوي', 'Apply to extender')
+              : s.t('سجّل دخول المقوي لتطبيقها (أو اضبطها من لوحته)', 'Log in to apply (or set in its panel)')),
+        ),
+      ]),
+    );
+  }
+
+  Widget _chBox(String label, String ch, Color c) => Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: c.withValues(alpha: 0.5)),
+        ),
+        child: Column(children: [
+          Text(label, style: const TextStyle(fontSize: 11, color: AppColors.text2)),
+          Text('CH $ch', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: c)),
+        ]),
+      );
 
   List<String> _channels(bool five) => five
       ? ['0', '36', '40', '44', '48', '52', '56', '60', '64', '149', '153', '157', '161']
