@@ -31,54 +31,133 @@ class _DevicesScreenState extends State<DevicesScreen> {
     return Icons.smartphone_rounded;
   }
 
+  bool showOld = false;
+
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
-    // devices known (online) + blocked/offline devices with rules
     final online = {for (final d in s.devices) d.mac: d};
-    final macs = <String>{...online.keys, ...s.rules.keys, ...s.deviceBytes.keys}.toList();
-    macs.sort((a, b) {
+    int cmp(String a, String b) {
       if (byUsage) return (s.deviceBytes[b] ?? 0).compareTo(s.deviceBytes[a] ?? 0);
       final da = online[a], db = online[b];
       return ((db?.rxRate ?? 0) + (db?.txRate ?? 0))
           .compareTo((da?.rxRate ?? 0) + (da?.txRate ?? 0));
-    });
+    }
+
+    final activeMacs = s.devices.where((d) => d.active).map((d) => d.mac).toList();
+    final routerMacs = activeMacs.where((m) => !(online[m]!.viaExtender)).toList()..sort(cmp);
+    final extMacs = activeMacs.where((m) => online[m]!.viaExtender).toList()..sort(cmp);
+    // blocked devices are not "active" but must stay visible to unblock them
+    final blocked = s.rules.values
+        .where((r) => r.shouldBlock(DateTime.now()) && !activeMacs.contains(r.mac))
+        .map((r) => r.mac)
+        .toList();
+    final old = s.devices
+        .where((d) => !d.active && !blocked.contains(d.mac))
+        .map((d) => d.mac)
+        .toList()
+      ..sort(cmp);
     final total = s.deviceBytes.values.fold<int>(0, (a, b) => a + b);
+    final ext = s.extenderDevice;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        TileGrid(minWidth: 150, children: [
+          StatTile(
+            label: s.t('متصل الآن', 'Online now'),
+            value: '${activeMacs.length}',
+            icon: Icons.wifi_rounded,
+            color: AppColors.green,
+          ),
+          StatTile(
+            label: s.t('على الراوتر', 'On router'),
+            value: '${routerMacs.length}',
+            icon: Icons.router_rounded,
+          ),
+          StatTile(
+            label: s.t('على المقوي', 'On extender'),
+            value: ext == null && extMacs.isEmpty ? '—' : '${extMacs.length}',
+            icon: Icons.wifi_tethering_rounded,
+            color: AppColors.purple,
+            sub: ext == null && extMacs.isEmpty
+                ? s.t('سجّل دخول المقوي لمعرفة أجهزته', 'Log in to extender')
+                : null,
+          ),
+          StatTile(
+            label: s.t('استهلاك مرصود', 'Tracked usage'),
+            value: fmtBytes(total),
+            icon: Icons.data_usage_rounded,
+            color: AppColors.amber,
+          ),
+        ]),
+        const SizedBox(height: 12),
         if (!s.routerSupportsPerDeviceRate)
           NoteBox(s.t(
-              'نسخة نظام الراوتر لا ترسل سرعة كل جهاز بشكل منفصل حتى الآن، لذلك عدّاد الجيجات لكل جهاز قد يبقى صفراً. الحظر والجدولة والقائمة تعمل بشكل طبيعي. أرسل لي صفحة "الإعدادات ← وحدة API" لـ lan/HostInfo لأضيف الحقول الصحيحة.',
-              'Router firmware does not report per-device speed yet, so per-device GB may stay 0. Blocking and scheduling still work.')),
-        SectionCard(
-          title: s.t('أكثر الأجهزة استهلاكاً (الدورة الحالية)', 'Top consumers (this cycle)'),
-          icon: Icons.leaderboard_rounded,
-          trailing: SegmentedButton<bool>(
-            segments: [
-              ButtonSegment(value: true, label: Text(s.t('الاستهلاك', 'Usage'))),
-              ButtonSegment(value: false, label: Text(s.t('السرعة', 'Speed'))),
-            ],
-            selected: {byUsage},
-            onSelectionChanged: (v) => setState(() => byUsage = v.first),
-            showSelectedIcon: false,
+              'الراوتر لا يرسل سرعة كل جهاز بشكل منفصل، لذلك قد يبقى عدّاد الجيجات لكل جهاز صفراً. أرسل لي "تقرير التشخيص" من الإعدادات لأضيف الحقول الصحيحة لراوترك.',
+              'Router does not report per-device speed yet; send the diagnostics report.')),
+        Row(children: [
+          Expanded(
+            child: SegmentedButton<bool>(
+              segments: [
+                ButtonSegment(value: true, label: Text(s.t('الأكثر استهلاكاً', 'Top usage'))),
+                ButtonSegment(value: false, label: Text(s.t('الأسرع الآن', 'Fastest now'))),
+              ],
+              selected: {byUsage},
+              onSelectionChanged: (v) => setState(() => byUsage = v.first),
+              showSelectedIcon: false,
+            ),
           ),
-          child: Text(
-            s.t('إجمالي ما تم رصده: ${fmtBytes(total)} · الأجهزة المتصلة: ${s.devices.where((d) => d.active).length}',
-                'Tracked total: ${fmtBytes(total)} · online: ${s.devices.where((d) => d.active).length}'),
-            style: const TextStyle(color: AppColors.text2),
-          ),
+        ]),
+        const SizedBox(height: 14),
+        _header(s.t('متصلة بالراوتر', 'Connected to router'), Icons.router_rounded,
+            AppColors.cyan, routerMacs.length),
+        for (final mac in routerMacs) _deviceCard(s, mac, online[mac], total),
+        if (routerMacs.isEmpty) _empty(s),
+        if (extMacs.isNotEmpty || ext != null) ...[
+          _header(s.t('متصلة بالمقوي', 'Connected to extender'), Icons.wifi_tethering_rounded,
+              AppColors.purple, extMacs.length),
+          for (final mac in extMacs) _deviceCard(s, mac, online[mac], total),
+          if (extMacs.isEmpty)
+            NoteBox(
+                s.t('لمعرفة الأجهزة المتصلة بالمقوي سجّل الدخول إليه من صفحة "المقوي".',
+                    'Log in to the extender to list its devices.'),
+                color: AppColors.purple),
+        ],
+        if (blocked.isNotEmpty) ...[
+          _header(s.t('محظورة', 'Blocked'), Icons.block, AppColors.red, blocked.length),
+          for (final mac in blocked) _deviceCard(s, mac, online[mac], total),
+        ],
+        const SizedBox(height: 6),
+        SwitchListTile(
+          value: showOld,
+          onChanged: (v) => setState(() => showOld = v),
+          title: Text(s.t('إظهار الأجهزة التي اتصلت سابقاً (${old.length})',
+              'Show previously connected (${old.length})')),
         ),
-        for (final mac in macs) _deviceCard(s, mac, online[mac], total),
-        if (macs.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
-            child: Center(child: Text(s.t('لا توجد أجهزة', 'No devices'))),
-          ),
+        if (showOld)
+          for (final mac in old) _deviceCard(s, mac, online[mac], total),
       ],
     );
   }
+
+  Widget _header(String t, IconData icon, Color c, int n) => Padding(
+        padding: const EdgeInsets.fromLTRB(4, 6, 4, 10),
+        child: Row(children: [
+          Icon(icon, color: c, size: 20),
+          const SizedBox(width: 8),
+          Text(t, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+          const SizedBox(width: 8),
+          Pill('$n', color: c),
+        ]),
+      );
+
+  Widget _empty(AppState s) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Center(
+            child: Text(s.t('لا توجد أجهزة', 'No devices'),
+                style: const TextStyle(color: AppColors.text2))),
+      );
 
   Widget _deviceCard(AppState s, String mac, DeviceInfo? d, int total) {
     final rule = s.rules[mac];

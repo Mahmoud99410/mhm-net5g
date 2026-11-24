@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
 import '../core/xml_utils.dart';
+import '../widgets/advice_card.dart';
 import '../widgets/common.dart';
 
 class SignalScreen extends StatefulWidget {
@@ -37,7 +38,7 @@ class _SignalScreenState extends State<SignalScreen> {
         SectionCard(
           title: s.t('إشارة الفور جي (LTE)', '4G LTE signal'),
           icon: Icons.signal_cellular_alt_rounded,
-          trailing: _bandChip(sig.s('band').isEmpty ? null : 'B${sig.s('band')}'),
+          trailing: _bandChip(_carrierText(s, false)),
           child: sig.s('rsrp').isEmpty
               ? Text(s.t('لا توجد إشارة 4G حالياً', 'No 4G signal'),
                   style: const TextStyle(color: AppColors.text2))
@@ -77,7 +78,7 @@ class _SignalScreenState extends State<SignalScreen> {
         SectionCard(
           title: s.t('إشارة الفايف جي (5G NR)', '5G NR signal'),
           icon: Icons.five_g_rounded,
-          trailing: _bandChip(sig.s('nrband').isEmpty ? null : 'n${sig.s('nrband')}'),
+          trailing: _bandChip(_carrierText(s, true)),
           child: sig.s('nrrsrp').isEmpty
               ? Text(
                   s.t('لا توجد إشارة 5G حالياً — الراوتر يعمل على 4G',
@@ -110,6 +111,82 @@ class _SignalScreenState extends State<SignalScreen> {
                   InfoRow(s.t('عرض النطاق', 'Bandwidth'),
                       '${sig.s('nrdlbandwidth')} / ${sig.s('nrulbandwidth')}'),
                 ]),
+        ),
+
+        // ---------- advisor ----------
+        SectionCard(
+          title: s.t('مستشار الإشارة — اقتراحات لك', 'Signal advisor'),
+          icon: Icons.psychology_alt_rounded,
+          child: Column(children: [
+            Row(children: [
+              Expanded(
+                child: StatTile(
+                  label: s.t('القدرة المتوقعة من البرج', 'Estimated capacity'),
+                  value: '${s.capacityMbps.toStringAsFixed(0)} Mbps',
+                  icon: Icons.insights_rounded,
+                  color: AppColors.green,
+                  sub: s.t('حسب عرض النطاق ونقاء الإشارة', 'from bandwidth + SINR'),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            for (final a in s.advice) AdviceCard(a),
+          ]),
+        ),
+
+        // ---------- backup ----------
+        SectionCard(
+          title: s.t('حفظ الإعدادات الحالية', 'Save current settings'),
+          icon: Icons.backup_rounded,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(
+              s.snapshot == null
+                  ? s.t('احفظ إعدادات الراوتر الحالية (نوع الشبكة، الباندات، الواي فاي) قبل أي تجربة، لترجع لها بضغطة واحدة.',
+                      'Save current router settings before experimenting; restore with one tap.')
+                  : s.t('آخر نسخة محفوظة: ${s.snapshot!['at']} — الوضع ${s.modeLabel('${s.snapshot!['NetworkMode']}')}',
+                      'Last backup: ${s.snapshot!['at']}'),
+              style: const TextStyle(color: AppColors.text2, height: 1.5),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          final err = await s.saveSnapshot();
+                          if (context.mounted) {
+                            toast(context, err ?? s.t('تم حفظ النسخة ✓', 'Saved ✓'),
+                                error: err != null);
+                          }
+                        },
+                  icon: const Icon(Icons.save_rounded),
+                  label: Text(s.t('حفظ', 'Save')),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy || s.snapshot == null
+                      ? null
+                      : () async {
+                          setState(() => busy = true);
+                          final err = await s.restoreSnapshot();
+                          if (!context.mounted) return;
+                          setState(() {
+                            busy = false;
+                            mode = null;
+                            bands = null;
+                          });
+                          toast(context, err ?? s.t('تم الاسترجاع ✓', 'Restored ✓'),
+                              error: err != null);
+                        },
+                  icon: const Icon(Icons.settings_backup_restore_rounded),
+                  label: Text(s.t('استرجاع', 'Restore')),
+                ),
+              ),
+            ]),
+          ]),
         ),
 
         // ---------- network mode ----------
@@ -250,6 +327,14 @@ class _SignalScreenState extends State<SignalScreen> {
     );
   }
 
+  String? _carrierText(AppState s, bool nr) {
+    final l = s.carriers.where((c) => c.isNr == nr).toList();
+    if (l.isEmpty) return null;
+    return l
+        .map((c) => '${c.label}${c.mhz > 0 ? ' · ${c.mhz.toStringAsFixed(0)}MHz' : ''}')
+        .join(' + ');
+  }
+
   String _bandHint(int b) {
     const m = {
       1: ' 2100',
@@ -275,6 +360,9 @@ class _SignalScreenState extends State<SignalScreen> {
             borderRadius: BorderRadius.circular(20),
           ),
           child: Text(text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textDirection: TextDirection.ltr,
               style: const TextStyle(color: AppColors.cyan, fontWeight: FontWeight.w700)),
         );
 

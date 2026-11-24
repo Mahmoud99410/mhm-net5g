@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../core/format.dart';
+
 class AppColors {
   static const bg = Color(0xFF0B1220);
   static const surface = Color(0xFF121B2E);
@@ -85,10 +87,19 @@ class SectionCard extends StatelessWidget {
                   const SizedBox(width: 8),
                 ],
                 Expanded(
+                  flex: 3,
                   child: Text(title!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                 ),
-                if (trailing != null) trailing!,
+                if (trailing != null) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    flex: 2,
+                    child: Align(alignment: AlignmentDirectional.centerEnd, child: trailing!),
+                  ),
+                ],
               ]),
             ),
           child,
@@ -471,4 +482,327 @@ class NoteBox extends StatelessWidget {
       ]),
     );
   }
+}
+
+
+/// Radial speedometer-style gauge.
+class RadialGauge extends StatelessWidget {
+  final double value; // current
+  final double max;
+  final String center;
+  final String unit;
+  final String label;
+  final Color color;
+  final double size;
+  const RadialGauge({
+    super.key,
+    required this.value,
+    required this.max,
+    required this.center,
+    required this.unit,
+    required this.label,
+    this.color = AppColors.cyan,
+    this.size = 150,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final frac = max <= 0 ? 0.0 : (value / max).clamp(0.0, 1.0);
+    return SizedBox(
+      width: size,
+      height: size * 0.82,
+      child: Stack(alignment: Alignment.center, children: [
+        Positioned.fill(
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: frac),
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, __) => CustomPaint(painter: _GaugePainter(v, color)),
+          ),
+        ),
+        Positioned(
+          top: size * 0.26,
+          child: Column(children: [
+            Text(center,
+                style: TextStyle(
+                    fontSize: size * 0.17, fontWeight: FontWeight.w900, color: Colors.white)),
+            Text(unit, style: TextStyle(fontSize: size * 0.08, color: color)),
+          ]),
+        ),
+        Positioned(
+          bottom: 0,
+          child: Text(label,
+              style: TextStyle(fontSize: size * 0.085, color: AppColors.text2)),
+        ),
+      ]),
+    );
+  }
+}
+
+class _GaugePainter extends CustomPainter {
+  final double frac;
+  final Color color;
+  _GaugePainter(this.frac, this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = math.min(size.width / 2, size.height / 1.1) - 8;
+    final c = Offset(size.width / 2, r + 8);
+    const start = math.pi * 0.75;
+    const sweep = math.pi * 1.5;
+    final rect = Rect.fromCircle(center: c, radius: r);
+    final bg = Paint()
+      ..color = AppColors.surface2
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 12
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(rect, start, sweep, false, bg);
+    // ticks
+    final tick = Paint()
+      ..color = AppColors.border
+      ..strokeWidth = 2;
+    for (var i = 0; i <= 10; i++) {
+      final a = start + sweep * i / 10;
+      final p1 = c + Offset(math.cos(a), math.sin(a)) * (r - 14);
+      final p2 = c + Offset(math.cos(a), math.sin(a)) * (r - 20);
+      canvas.drawLine(p1, p2, tick);
+    }
+    if (frac > 0) {
+      final fg = Paint()
+        ..shader = SweepGradient(
+          startAngle: 0,
+          endAngle: sweep,
+          colors: [color.withValues(alpha: 0.45), color],
+          transform: const GradientRotation(start),
+        ).createShader(rect)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 12
+        ..strokeCap = StrokeCap.round;
+      canvas.drawArc(rect, start, sweep * frac, false, fg);
+      final a = start + sweep * frac;
+      final dot = c + Offset(math.cos(a), math.sin(a)) * r;
+      canvas.drawCircle(dot, 7, Paint()..color = Colors.white);
+      canvas.drawCircle(dot, 4, Paint()..color = color);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _GaugePainter old) => old.frac != frac || old.color != color;
+}
+
+/// Live vertical bars: download (cyan) and upload (purple) side by side.
+class LiveBars extends StatelessWidget {
+  final List<double> down;
+  final List<double> up;
+  final int count;
+  final double height;
+  const LiveBars({
+    super.key,
+    required this.down,
+    required this.up,
+    this.count = 30,
+    this.height = 150,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    List<double> tail(List<double> l) =>
+        l.length > count ? l.sublist(l.length - count) : [...List.filled(count - l.length, 0.0), ...l];
+    final d = tail(down), u = tail(up);
+    final mx = math.max(1.0, [...d, ...u].reduce(math.max));
+    return SizedBox(
+      height: height,
+      child: Column(children: [
+        Expanded(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            textDirection: TextDirection.ltr,
+            children: [
+              for (var i = 0; i < count; i++)
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(child: _bar(d[i] / mx, AppColors.cyan)),
+                      const SizedBox(width: 1),
+                      Expanded(child: _bar(u[i] / mx, AppColors.purple)),
+                      const SizedBox(width: 2),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          _legend(AppColors.cyan, '↓'),
+          const SizedBox(width: 16),
+          _legend(AppColors.purple, '↑'),
+          const SizedBox(width: 16),
+          Text('max ${fmtRate(mx)}',
+              style: const TextStyle(fontSize: 11, color: AppColors.text2)),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _bar(double f, Color c) => AnimatedContainer(
+        duration: const Duration(milliseconds: 400),
+        height: math.max(2.0, (height - 26) * f.clamp(0.0, 1.0)),
+        decoration: BoxDecoration(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+          gradient: LinearGradient(
+            begin: Alignment.bottomCenter,
+            end: Alignment.topCenter,
+            colors: [c.withValues(alpha: 0.35), c],
+          ),
+        ),
+      );
+
+  Widget _legend(Color c, String t) => Row(children: [
+        Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(3))),
+        const SizedBox(width: 4),
+        Text(t, style: const TextStyle(fontSize: 12)),
+      ]);
+}
+
+/// One node of the network map.
+class MapNode {
+  final IconData icon;
+  final String title;
+  final String sub;
+  final Color color;
+  const MapNode(this.icon, this.title, this.sub, this.color);
+}
+
+/// Illustrated network topology: Tower -> Router -> Extender -> Devices.
+class NetworkMap extends StatefulWidget {
+  final List<MapNode> nodes;
+  final List<String> links; // label for each link between nodes
+  const NetworkMap({super.key, required this.nodes, required this.links});
+
+  @override
+  State<NetworkMap> createState() => _NetworkMapState();
+}
+
+class _NetworkMapState extends State<NetworkMap> with SingleTickerProviderStateMixin {
+  late final AnimationController ac =
+      AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat();
+
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = <Widget>[];
+    for (var i = 0; i < widget.nodes.length; i++) {
+      items.add(Expanded(flex: 3, child: _node(widget.nodes[i])));
+      if (i < widget.nodes.length - 1) {
+        items.add(Expanded(
+          flex: 2,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(
+              height: 16,
+              child: AnimatedBuilder(
+                animation: ac,
+                builder: (_, __) => CustomPaint(
+                  size: Size.infinite,
+                  painter: _FlowPainter(ac.value, widget.nodes[i + 1].color),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            FittedBox(
+              child: Text(i < widget.links.length ? widget.links[i] : '',
+                  style: const TextStyle(fontSize: 10, color: AppColors.text2)),
+            ),
+          ]),
+        ));
+      }
+    }
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: items),
+    );
+  }
+
+  Widget _node(MapNode n) => Column(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: RadialGradient(colors: [
+              n.color.withValues(alpha: 0.35),
+              n.color.withValues(alpha: 0.08),
+            ]),
+            border: Border.all(color: n.color, width: 2),
+            boxShadow: [BoxShadow(color: n.color.withValues(alpha: 0.35), blurRadius: 14)],
+          ),
+          child: Icon(n.icon, color: n.color, size: 28),
+        ),
+        const SizedBox(height: 6),
+        FittedBox(
+          child: Text(n.title,
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+        ),
+        FittedBox(
+          child: Text(n.sub, style: TextStyle(fontSize: 10, color: n.color)),
+        ),
+      ]);
+}
+
+class _FlowPainter extends CustomPainter {
+  final double t;
+  final Color color;
+  _FlowPainter(this.t, this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final y = size.height / 2;
+    canvas.drawLine(
+        Offset(0, y),
+        Offset(size.width, y),
+        Paint()
+          ..color = color.withValues(alpha: 0.25)
+          ..strokeWidth = 3
+          ..strokeCap = StrokeCap.round);
+    for (var k = 0; k < 3; k++) {
+      final p = ((t + k / 3) % 1.0) * size.width;
+      canvas.drawCircle(Offset(p, y), 3.5, Paint()..color = color);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _FlowPainter old) => true;
+}
+
+/// Small pill showing a band / carrier.
+class Pill extends StatelessWidget {
+  final String text;
+  final Color color;
+  final IconData? icon;
+  const Pill(this.text, {super.key, this.color = AppColors.cyan, this.icon});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withValues(alpha: 0.5)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (icon != null) ...[Icon(icon, size: 14, color: color), const SizedBox(width: 4)],
+          Text(text,
+              textDirection: TextDirection.ltr,
+              style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 12)),
+        ]),
+      );
 }

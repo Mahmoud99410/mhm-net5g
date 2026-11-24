@@ -150,22 +150,42 @@ class ExtenderApi {
     return [];
   }
 
-  /// Enable/disable a radio by frequency label ("2.4GHz" or "5GHz").
-  Future<void> setRadio(Map<String, dynamic> radio, bool enable) async {
-    final copy = Map<String, dynamic>.from(radio);
-    for (final k in ['WifiEnable', 'Enable', 'enable']) {
-      if (copy.containsKey(k)) copy[k] = enable;
+  static bool is5g(Map<String, dynamic> r) =>
+      '${r['FrequencyBand'] ?? r['Frequency'] ?? r['Band'] ?? r['ID'] ?? ''}'.contains('5');
+
+  /// Change fields of one radio and send it back.
+  Future<void> setRadioFields(Map<String, dynamic> radio, Map<String, dynamic> changes) async {
+    final copy = Map<String, dynamic>.from(radio)..addAll(changes);
+    try {
+      await postJson('/api/ntwk/WlanBasic', {is5g(radio) ? 'config5g' : 'config2g': copy});
+    } catch (_) {
+      await postJson('/api/ntwk/wlanradio', copy);
     }
-    await postJson('/api/ntwk/WlanBasic', {
-      'config2g': copy['FrequencyBand'] == '2.4GHz' ? copy : null,
-      'config5g': copy['FrequencyBand'] == '5GHz' ? copy : null,
-    }..removeWhere((k, v) => v == null));
   }
 
-  Future<void> setChannel(Map<String, dynamic> radio, String channel) async {
-    final copy = Map<String, dynamic>.from(radio);
-    copy['Channel'] = channel;
-    await postJson('/api/ntwk/wlanradio', copy);
+  /// Enable/disable a radio.
+  Future<void> setRadio(Map<String, dynamic> radio, bool enable) async {
+    final changes = <String, dynamic>{};
+    for (final k in ['WifiEnable', 'Enable', 'enable']) {
+      if (radio.containsKey(k)) changes[k] = radio[k] is bool ? enable : (enable ? '1' : '0');
+    }
+    if (changes.isEmpty) changes['WifiEnable'] = enable;
+    await setRadioFields(radio, changes);
+  }
+
+  Future<void> setChannel(Map<String, dynamic> radio, String channel) =>
+      setRadioFields(radio, {'Channel': channel});
+
+  /// Uplink (connection to main router) info, if the extender exposes it.
+  Future<Map<String, dynamic>> uplink() async {
+    for (final p in ['/api/ntwk/repeaterinfo', '/api/ntwk/meshinfo', '/api/ntwk/wandetect']) {
+      try {
+        final j = await getJson(p);
+        if (j is Map<String, dynamic> && j.isNotEmpty) return j;
+        if (j is List && j.isNotEmpty && j.first is Map<String, dynamic>) return j.first;
+      } catch (_) {}
+    }
+    return {};
   }
 
   Future<List<Map<String, dynamic>>> hosts() async {

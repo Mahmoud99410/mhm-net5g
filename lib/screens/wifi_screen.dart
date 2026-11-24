@@ -97,6 +97,7 @@ class _WifiScreenState extends State<WifiScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           if (error != null) NoteBox(error!, color: AppColors.red),
+          if (ssids.isNotEmpty) _bandModeCard(s),
           for (var i = 0; i < ssids.length; i++) _ssidCard(s, i),
           if (ssids.isNotEmpty)
             FilledButton.icon(
@@ -107,6 +108,61 @@ class _WifiScreenState extends State<WifiScreen> {
             ),
         ],
       ),
+    );
+  }
+
+  String _routerMode() {
+    bool a = false, b = false;
+    for (final m in ssids) {
+      if (_isGuest(m)) continue;
+      final band = _band(m);
+      final on = m.s('WifiEnable', '1') == '1';
+      if (band.startsWith('5')) b = b || on;
+      if (band.startsWith('2')) a = a || on;
+    }
+    if (a && b) return 'both';
+    if (b) return '5';
+    if (a) return '2.4';
+    return 'both';
+  }
+
+  Widget _bandModeCard(AppState s) {
+    return SectionCard(
+      title: s.t('ترددات بث الراوتر', 'Router WiFi bands'),
+      icon: Icons.cell_wifi_rounded,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SegmentedButton<String>(
+          segments: [
+            ButtonSegment(value: '2.4', label: Text(s.t('2.4 فقط', '2.4 only'))),
+            ButtonSegment(value: '5', label: Text(s.t('5 فقط', '5 only'))),
+            ButtonSegment(value: 'both', label: Text(s.t('الاثنين', 'Both'))),
+          ],
+          selected: {_routerMode()},
+          onSelectionChanged: saving
+              ? null
+              : (v) async {
+                  final m = v.first;
+                  final ok = await confirm(
+                      context,
+                      s.t('تغيير ترددات البث؟', 'Change bands?'),
+                      s.t('ستعيد الشبكة التشغيل خلال دقيقة. الأجهزة المتصلة على التردد الذي ستوقفه ستنقطع.',
+                          'WiFi will restart; devices on the disabled band disconnect.'));
+                  if (!ok) return;
+                  setState(() => saving = true);
+                  final err = await s.setRouterWifiBands(on24: m != '5', on5: m != '2.4');
+                  if (!mounted) return;
+                  setState(() => saving = false);
+                  toast(context, err ?? s.t('تم التطبيق ✓', 'Applied ✓'), error: err != null);
+                  if (err == null) _load();
+                },
+        ),
+        const SizedBox(height: 10),
+        Text(
+          s.t('2.4 GHz: مدى أبعد ويخترق الجدران. 5 GHz: أسرع بكثير للأجهزة القريبة. الأفضل غالباً تشغيل الاثنين.',
+              '2.4 GHz: longer range. 5 GHz: much faster nearby. Both is usually best.'),
+          style: const TextStyle(color: AppColors.text2, fontSize: 12, height: 1.5),
+        ),
+      ]),
     );
   }
 

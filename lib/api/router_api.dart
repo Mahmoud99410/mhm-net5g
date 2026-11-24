@@ -352,6 +352,12 @@ class HuaweiCpeApi {
     return r.m('Hosts').list('Host');
   }
 
+  /// Hosts currently associated over WiFi (live list).
+  Future<List<Map<String, dynamic>>> wlanHosts() async {
+    final r = await get('wlan/host-list');
+    return r.m('Hosts').list('Host');
+  }
+
   // ---------------- WiFi ----------------
   Future<List<Map<String, dynamic>>> wifiSsids() async {
     final r = await get('wlan/multi-basic-settings');

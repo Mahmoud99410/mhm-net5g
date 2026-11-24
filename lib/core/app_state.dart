@@ -20,6 +20,8 @@ class DeviceInfo {
   int connectedSec;
   double rxRate; // bytes/s if router reports
   double txRate;
+  bool viaExtender;
+  bool isExtender;
   Map<String, dynamic> raw;
 
   DeviceInfo({
@@ -31,6 +33,8 @@ class DeviceInfo {
     this.connectedSec = 0,
     this.rxRate = 0,
     this.txRate = 0,
+    this.viaExtender = false,
+    this.isExtender = false,
     this.raw = const {},
   });
 }
@@ -106,6 +110,18 @@ class BandScanResult {
   double get score => ok ? sinr * 2 + (rsrp + 140) / 2 + mbps / 5 : -999;
 }
 
+enum AdviceLevel { good, info, warn, bad }
+
+enum AdviceAction { none, autoMode, scan, unlock }
+
+class Advice {
+  final AdviceLevel level;
+  final String title;
+  final String body;
+  final AdviceAction action;
+  Advice(this.level, this.title, this.body, {this.action = AdviceAction.none});
+}
+
 const socialSites = <String, List<String>>{
   'Facebook': ['facebook.com', 'fbcdn.net', 'messenger.com'],
   'Instagram': ['instagram.com', 'cdninstagram.com'],
@@ -130,6 +146,8 @@ class AppState extends ChangeNotifier {
   String extenderPass = '';
   int resetDay = 16;
   double monthlyLimitGb = 0;
+  String unit = 'Mbps';
+  int autoTestMin = 0; // 0 = off
 
   // ----- runtime -----
   late HuaweiCpeApi api;
@@ -148,6 +166,7 @@ class AppState extends ChangeNotifier {
   Map<String, dynamic> netModeList = {};
   String operatorName = '';
   List<DeviceInfo> devices = [];
+  List<Map<String, dynamic>> extHosts = [];
   final List<double> dlHistory = [];
   final List<double> ulHistory = [];
 
@@ -169,6 +188,15 @@ class AppState extends ChangeNotifier {
   Timer? _slow;
   Timer? _minute;
   int _tick = 0;
+  int _minutes = 0;
+
+  // ----- speed test results -----
+  double lastTestDl = 0; // Mbps
+  double lastTestUl = 0;
+  int lastPing = -1;
+  String lastTestAt = '';
+  bool testing = false;
+  double liveTest = 0;
 
   // ----- band scan -----
   bool scanning = false;
@@ -202,6 +230,12 @@ class AppState extends ChangeNotifier {
     extenderPass = _unhide(p.getString('extenderPass') ?? '');
     resetDay = p.getInt('resetDay') ?? 16;
     monthlyLimitGb = p.getDouble('limitGb') ?? 0;
+    unit = p.getString('unit') ?? 'Mbps';
+    speedUnit = unit;
+    autoTestMin = p.getInt('autoTestMin') ?? 0;
+    lastTestDl = p.getDouble('lastTestDl') ?? 0;
+    lastTestUl = p.getDouble('lastTestUl') ?? 0;
+    lastTestAt = p.getString('lastTestAt') ?? '';
     cycleKey = p.getString('cycleKey') ?? '';
     blockedUrls = p.getStringList('blockedUrls') ?? [];
     try {
@@ -236,6 +270,8 @@ class AppState extends ChangeNotifier {
     await p.setString('extenderPass', remember ? _hide(extenderPass) : '');
     await p.setInt('resetDay', resetDay);
     await p.setDouble('limitGb', monthlyLimitGb);
+    await p.setString('unit', unit);
+    await p.setInt('autoTestMin', autoTestMin);
     await p.setStringList('blockedUrls', blockedUrls);
   }
 
@@ -298,7 +334,11 @@ class AppState extends ChangeNotifier {
     _stopTimers();
     _fast = Timer.periodic(const Duration(seconds: 2), (_) => _pollFast());
     _slow = Timer.periodic(const Duration(seconds: 10), (_) => _pollSlow());
-    _minute = Timer.periodic(const Duration(minutes: 1), (_) => enforceRules());
+    _minute = Timer.periodic(const Duration(minutes: 1), (_) {
+      enforceRules();
+      _minutes++;
+      if (autoTestMin > 0 && _minutes % autoTestMin == 0) runSpeedTest();
+    });
   }
 
   void _stopTimers() {
@@ -355,6 +395,28 @@ class AppState extends ChangeNotifier {
   Future<void> _pollSlow() async {
     if (!connected) return;
     await _safe(() async => month = await api.monthStats());
+    // live WiFi clients (router)
+    final wlan = <String, Map<String, dynamic>>{};
+    bool wlanOk = false;
+    try {
+      for (final h in await api.wlanHosts()) {
+        final m = normMac(h.s('MacAddress'));
+        if (m.isNotEmpty) wlan[m] = h;
+      }
+      wlanOk = true;
+    } catch (_) {}
+    // clients of the extender (if logged in)
+    final extMacs = <String>{};
+    if (ext?.loggedIn == true) {
+      try {
+        extHosts = await ext!.hosts();
+        for (final h in extHosts) {
+          final m = normMac('${h['MACAddress'] ?? h['MacAddress'] ?? ''}');
+          final act = '${h['Active'] ?? h['active'] ?? 'true'}'.toLowerCase();
+          if (m.isNotEmpty && act != 'false' && act != '0') extMacs.add(m);
+        }
+      } catch (_) {}
+    }
     await _safe(() async {
       final hs = await api.hosts();
       final now = DateTime.now();
@@ -364,24 +426,38 @@ class AppState extends ChangeNotifier {
       _lastHostPoll = now;
       final list = <DeviceInfo>[];
       bool anyRate = false;
+      String extenderMac = '';
       for (final h in hs) {
         final mac = normMac(h.s('MacAddress'));
         if (mac.isEmpty) continue;
-        final name = [h.s('ActualName'), h.s('HostName'), h.s('DeviceName')]
-            .firstWhere((e) => e.isNotEmpty && e != 'unknown', orElse: () => '');
-        final rx = _rateField(h, true);
-        final tx = _rateField(h, false);
+        final raw = Map<String, dynamic>.from(h);
+        final w = wlan[mac];
+        if (w != null) {
+          w.forEach((k, v) {
+            if (v is String && !raw.containsKey(k)) raw[k] = v;
+          });
+        }
+        final name = [raw.s('ActualName'), raw.s('HostName'), raw.s('DeviceName')]
+            .firstWhere((e) => e.isNotEmpty && e.toLowerCase() != 'unknown', orElse: () => '');
+        final rx = _rateField(raw, true);
+        final tx = _rateField(raw, false);
         if (rx > 0 || tx > 0) anyRate = true;
+        final iface = _iface(raw);
+        final ip = raw.s('IpAddress').split(';').first;
+        final isExt = _looksLikeExtender(name, ip);
+        if (isExt) extenderMac = mac;
         final d = DeviceInfo(
           mac: mac,
           name: name.isNotEmpty ? name : (deviceNames[mac] ?? mac),
-          ip: h.s('IpAddress').split(';').first,
-          active: h.s('Active', '1') != '0' && h.s('Active', 'true') != 'false',
-          iface: _iface(h),
-          connectedSec: h.i('AssociatedTime', h.i('ConnectionTime', 0)),
+          ip: ip,
+          active: _isActive(h, mac, iface, wlan.keys.toSet(), wlanOk, extMacs),
+          iface: iface,
+          connectedSec: raw.i('AssociatedTime', raw.i('ConnectionTime', raw.i('OnlineTime', 0))),
           rxRate: rx,
           txRate: tx,
-          raw: h,
+          isExtender: isExt,
+          viaExtender: extMacs.contains(mac),
+          raw: raw,
         );
         if (name.isNotEmpty) deviceNames[mac] = name;
         if (dt > 0 && dt < 120 && d.active) {
@@ -389,13 +465,56 @@ class AppState extends ChangeNotifier {
         }
         list.add(d);
       }
+      // devices whose host record points at the extender MAC are behind it
+      if (extenderMac.isNotEmpty) {
+        for (final d in list) {
+          if (d.mac == extenderMac) continue;
+          final points = d.raw.entries.any((e) =>
+              e.value is String &&
+              e.key.toLowerCase() != 'macaddress' &&
+              normMac(e.value as String) == extenderMac);
+          if (points) d.viaExtender = true;
+        }
+      }
       routerSupportsPerDeviceRate = anyRate;
-      list.sort((a, b) => (b.rxRate + b.txRate).compareTo(a.rxRate + a.txRate));
+      list.sort((a, b) {
+        if (a.active != b.active) return a.active ? -1 : 1;
+        return (b.rxRate + b.txRate).compareTo(a.rxRate + a.txRate);
+      });
       devices = list;
     });
     await _saveUsage();
     notifyListeners();
   }
+
+  bool _isActive(Map<String, dynamic> h, String mac, String iface, Set<String> wlanMacs,
+      bool wlanOk, Set<String> extMacs) {
+    if (wlanMacs.contains(mac) || extMacs.contains(mac)) return true;
+    for (final k in ['Active', 'active', 'Online', 'online', 'IsActive', 'Status', 'status']) {
+      final v = h[k];
+      if (v is String && v.isNotEmpty) {
+        final l = v.toLowerCase();
+        return l == '1' || l == 'true' || l == 'online' || l == 'active' || l == 'connected';
+      }
+    }
+    if (iface == 'LAN') return true;
+    return !wlanOk;
+  }
+
+  bool _looksLikeExtender(String name, String ip) {
+    final n = name.toLowerCase();
+    if (extenderIp.isNotEmpty && ip == extenderIp) return true;
+    return n.contains('wa8021') || n.contains('echolife') || n.contains('wa80');
+  }
+
+  DeviceInfo? get extenderDevice {
+    for (final d in devices) {
+      if (d.isExtender) return d;
+    }
+    return null;
+  }
+
+  List<DeviceInfo> get activeDevices => devices.where((d) => d.active).toList();
 
   String _iface(Map<String, dynamic> h) {
     final f = (h.s('Frequency') + h.s('InterfaceType') + h.s('Band')).toLowerCase();
@@ -820,6 +939,8 @@ class AppState extends ChangeNotifier {
 
   // ================= Extender =================
   String guessExtenderIp() {
+    final ed = extenderDevice;
+    if (ed != null && ed.ip.isNotEmpty) return ed.ip;
     for (final d in devices) {
       final n = d.name.toLowerCase();
       if (n.contains('wa8021') || n.contains('echolife') || n.contains('huawei-wa') ||
@@ -844,6 +965,338 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return e.toString();
     }
+  }
+
+
+  // ================= units =================
+  void setUnit(String u) {
+    unit = u;
+    speedUnit = u;
+    saveSettings();
+    notifyListeners();
+  }
+
+  void setAutoTest(int minutes) {
+    autoTestMin = minutes;
+    saveSettings();
+    notifyListeners();
+  }
+
+  // ================= speed test (shared) =================
+  Future<void> runSpeedTest() async {
+    if (testing) return;
+    testing = true;
+    liveTest = 0;
+    notifyListeners();
+    try {
+      lastPing = await measurePing();
+      notifyListeners();
+      lastTestDl = await measureDownload(
+          bytes: 60000000,
+          onProgress: (v) {
+            liveTest = v;
+            notifyListeners();
+          });
+      notifyListeners();
+      lastTestUl = await measureUpload(bytes: 10000000);
+      final n = DateTime.now();
+      lastTestAt =
+          '${dayKey(n)} ${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
+      await _prefs?.setDouble('lastTestDl', lastTestDl);
+      await _prefs?.setDouble('lastTestUl', lastTestUl);
+      await _prefs?.setString('lastTestAt', lastTestAt);
+    } finally {
+      testing = false;
+      notifyListeners();
+    }
+  }
+
+  // ================= carriers / capacity =================
+  List<Carrier> get carriers {
+    final list = parseCarriers(signal.s('band'));
+    final nr = signal.s('nrband');
+    if (nr.isNotEmpty && !list.any((c) => c.isNr)) {
+      list.add(Carrier('N$nr', signal.d('nrdlbandwidth'), signal.s('nrearfcn')));
+    }
+    if (list.isEmpty && signal.s('band').isNotEmpty) {
+      list.add(Carrier('B${signal.s('band')}', signal.d('dlbandwidth'), signal.s('earfcn')));
+    }
+    return list;
+  }
+
+  /// Estimated max download the router can receive from the tower (Mbps).
+  double get capacityMbps {
+    var total = 0.0;
+    for (final c in carriers) {
+      final sinr = c.isNr ? signal.d('nrsinr', signal.d('sinr')) : signal.d('sinr');
+      var mhz = c.mhz;
+      if (mhz <= 0) mhz = c.isNr ? signal.d('nrdlbandwidth', 100) : signal.d('dlbandwidth', 20);
+      total += estimateCapacityMbps(mhz, sinr, mimo: c.isNr ? 4 : 2);
+    }
+    return total;
+  }
+
+  // ================= snapshots (backup / restore) =================
+  Map<String, dynamic>? get snapshot {
+    final raw = _prefs?.getString('snapshot');
+    if (raw == null) return null;
+    try {
+      return jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> saveSnapshot() async {
+    try {
+      final nm = await api.netMode();
+      List<Map<String, dynamic>> wifi = [];
+      try {
+        wifi = await api.wifiSsids();
+      } catch (_) {}
+      final n = DateTime.now();
+      final snap = {
+        'at': '${dayKey(n)} ${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}',
+        'NetworkMode': nm.s('NetworkMode'),
+        'LTEBand': nm.s('LTEBand'),
+        'wifi': [
+          for (final w in wifi)
+            {'Index': w.s('Index'), 'ID': w.s('ID'), 'WifiEnable': w.s('WifiEnable')}
+        ],
+        'signal': {
+          'rsrp': signal.s('rsrp'),
+          'sinr': signal.s('sinr'),
+          'nrrsrp': signal.s('nrrsrp'),
+          'nrsinr': signal.s('nrsinr'),
+        },
+      };
+      await _prefs?.setString('snapshot', jsonEncode(snap));
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
+  Future<String?> restoreSnapshot() async {
+    final snap = snapshot;
+    if (snap == null) return t('لا توجد نسخة محفوظة', 'No saved backup');
+    try {
+      await api.setNetMode(
+          mode: '${snap['NetworkMode'] ?? '00'}', lteBand: '${snap['LTEBand'] ?? ''}');
+      final saved = (snap['wifi'] as List?) ?? [];
+      if (saved.isNotEmpty) {
+        final cur = await api.wifiSsids();
+        var changed = false;
+        for (final c in cur) {
+          for (final w in saved) {
+            if (w is Map && '${w['ID']}${w['Index']}' == c.s('ID') + c.s('Index')) {
+              if (c['WifiEnable'] != w['WifiEnable']) {
+                c['WifiEnable'] = '${w['WifiEnable']}';
+                changed = true;
+              }
+            }
+          }
+        }
+        if (changed) await api.saveWifiSsids(cur);
+      }
+      netMode = await api.netMode();
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
+  // ================= advisor =================
+  List<Advice> get advice {
+    final out = <Advice>[];
+    final rsrp = signal.d('rsrp');
+    final sinr = signal.d('sinr');
+    final nrrsrp = signal.d('nrrsrp');
+    final nrsinr = signal.d('nrsinr');
+    final mode = netMode.s('NetworkMode', '00');
+    final locked = lockedLteBands;
+
+    if (has5G && nrrsrp >= -95 && nrsinr >= 10) {
+      out.add(Advice(AdviceLevel.good, t('إعدادك الحالي ممتاز', 'Current setup is excellent'),
+          t('الراوتر متصل بـ 5G بإشارة قوية. اترك نوع الشبكة على "تلقائي" ولا تقفل الباندات.',
+              'Strong 5G. Keep mode on Auto, no band lock.')));
+    }
+    if (has5G && nrsinr < 5) {
+      out.add(Advice(AdviceLevel.warn, t('نقاء إشارة 5G منخفض', 'Low 5G SINR'),
+          t('SINR = ${nrsinr.toStringAsFixed(0)} dB. حرّك الراوتر قرب نافذة وارفعه للأعلى، وأبعده عن الجدران والأجهزة. كل 3 dB أعلى = سرعة أكبر بشكل واضح.',
+              'Move the router near a window and higher; away from walls.')));
+    }
+    if (!has5G && mode != '03') {
+      out.add(Advice(AdviceLevel.warn, t('لا توجد إشارة 5G الآن', 'No 5G right now'),
+          t('الراوتر يعمل على 4G فقط. جرّب مكاناً آخر في البيت (قرب نافذة باتجاه برج زين) ثم راقب مؤشر 5G في الرئيسية.',
+              'Running on 4G only. Try another spot near a window.')));
+    }
+    if (mode == '03') {
+      out.add(Advice(AdviceLevel.info, t('وضع 4G فقط مفعّل', '4G-only mode is on'),
+          t('أنت تمنع الراوتر من استخدام 5G. إذا كانت 5G متوفرة عندك ارجع إلى "تلقائي" لسرعة أعلى بكثير.',
+              'Switch to Auto to use 5G.'),
+          action: AdviceAction.autoMode));
+    }
+    if (mode == '08') {
+      out.add(Advice(AdviceLevel.warn, t('وضع 5G فقط مفعّل', '5G-only mode is on'),
+          t('إذا انقطع الإنترنت أو أصبح غير مستقر ارجع إلى "تلقائي". شبكة زين 5G غالباً NSA وتحتاج 4G معها.',
+              'Zain 5G is usually NSA and needs 4G; use Auto if unstable.'),
+          action: AdviceAction.autoMode));
+    }
+    if (rsrp != 0 && rsrp < -105) {
+      out.add(Advice(AdviceLevel.bad, t('إشارة 4G ضعيفة', 'Weak 4G signal'),
+          t('RSRP = ${rsrp.toStringAsFixed(0)} dBm. الإشارة الجيدة أعلى من -95. غيّر مكان الراوتر أو استخدم "البحث عن أقوى تردد".',
+              'Move the router or run the band finder.'),
+          action: AdviceAction.scan));
+    } else if (rsrp != 0 && sinr < 8 && locked.isEmpty) {
+      out.add(Advice(AdviceLevel.info, t('يمكن تحسين 4G', '4G can be improved'),
+          t('نقاء إشارة 4G متوسط (${sinr.toStringAsFixed(0)} dB). شغّل "البحث عن أقوى تردد" ليجرب الباندات ويختار الأفضل لك.',
+              'Run the band finder to pick the best band.'),
+          action: AdviceAction.scan));
+    }
+    if (locked.isNotEmpty) {
+      out.add(Advice(AdviceLevel.info, t('باندات مقفولة: ${locked.map((b) => 'B$b').join(', ')}', 'Locked bands'),
+          t('القفل مفيد إذا كان الباند المختار أقوى عندك. إذا تغير الحال (ازدحام مساءً مثلاً) أرجعه إلى "كل الباندات".',
+              'Unlock if speed drops.'),
+          action: AdviceAction.unlock));
+    }
+    final ext = extenderDevice;
+    out.add(Advice(AdviceLevel.info, t('الواي فاي والمقوي', 'WiFi & extender'),
+        t('اجعل 5 GHz للأجهزة القريبة (أسرع)، و 2.4 GHz للبعيدة وخلف الجدران. ضع المقوي في منتصف المسافة بين الراوتر والغرف البعيدة${ext == null ? '' : ' — المقوي ظاهر عند الراوتر ✓'}.',
+            '5 GHz for near devices, 2.4 GHz for far. Place the extender half-way.')));
+    return out;
+  }
+
+  // ================= router WiFi bands (2.4 / 5) =================
+  String _bandOf(Map<String, dynamic> m) {
+    final f = m.s('WifiFrequency', m.s('FrequencyBand'));
+    final id = m.s('ID');
+    if (f.isNotEmpty) return f.contains('5') ? '5' : '2.4';
+    if (id.contains('Radio.2')) return '5';
+    if (id.contains('Radio.1')) return '2.4';
+    return '?';
+  }
+
+  bool _isGuest(Map<String, dynamic> m) =>
+      m.s('wifiisguestnetwork') == '1' || m.s('WifiGuest') == '1';
+
+  /// Returns {'2.4': bool, '5': bool} for the main (non-guest) networks.
+  Future<Map<String, bool>> routerWifiBands() async {
+    final l = await api.wifiSsids();
+    final out = <String, bool>{};
+    for (final m in l) {
+      if (_isGuest(m)) continue;
+      final b = _bandOf(m);
+      out[b] = (out[b] ?? false) || m.s('WifiEnable') == '1';
+    }
+    return out;
+  }
+
+  Future<String?> setRouterWifiBands({required bool on24, required bool on5}) async {
+    if (!on24 && !on5) return t('يجب تشغيل تردد واحد على الأقل', 'Keep at least one band on');
+    try {
+      final l = await api.wifiSsids();
+      for (final m in l) {
+        if (_isGuest(m)) continue;
+        final b = _bandOf(m);
+        if (b == '2.4') m['WifiEnable'] = on24 ? '1' : '0';
+        if (b == '5') m['WifiEnable'] = on5 ? '1' : '0';
+      }
+      await api.saveWifiSsids(l);
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
+  // ================= extender link quality (as seen by the router) =================
+  Map<String, String> get extenderLink {
+    final d = extenderDevice;
+    final out = <String, String>{};
+    if (d == null) return out;
+    d.raw.forEach((k, v) {
+      if (v is! String || v.isEmpty) return;
+      final l = k.toLowerCase();
+      if (l.contains('rssi') ||
+          l.contains('signal') ||
+          l.contains('snr') ||
+          l.contains('rate') ||
+          l.contains('speed') ||
+          l.contains('frequency') ||
+          l.contains('band') ||
+          l.contains('channel')) {
+        out[k] = v;
+      }
+    });
+    return out;
+  }
+
+  // ================= diagnostics =================
+  static const _diagPaths = [
+    'device/information',
+    'device/signal',
+    'monitoring/status',
+    'monitoring/traffic-statistics',
+    'monitoring/month_statistics',
+    'monitoring/start_date',
+    'net/net-mode',
+    'net/net-mode-list',
+    'net/current-plmn',
+    'lan/HostInfo',
+    'wlan/host-list',
+    'wlan/multi-basic-settings',
+    'wlan/multi-macfilter-settings',
+    'wlan/wifi-feature-switch',
+    'wlan/basic-settings',
+    'wlan/multi-switch-settings',
+    'wlan/wifiprofile',
+    'security/url-filter',
+    'security/firewall-switch',
+    'timerule/timerule',
+    'statistic/statistics-feature-switch',
+  ];
+
+  Future<String> buildDiagnostics() async {
+    final sb = StringBuffer('MHM NET5G diagnostics ${DateTime.now()}\n');
+    final mask = RegExp(
+        r'<(Imei|Imsi|Iccid|SerialNumber|Msisdn|WifiWpapsk|WifiWepKey\d?|Mac?Address1|Mac?Address2|WanIPAddress|WanIPv6Address)>([^<]*)</',
+        caseSensitive: false);
+    for (final p in _diagPaths) {
+      String body;
+      try {
+        body = await api.getRaw(p);
+      } catch (e) {
+        body = 'ERROR $e';
+      }
+      body = body.replaceAllMapped(mask, (m) => '<${m.group(1)}>***</');
+      sb.writeln('\n===== $p =====\n$body');
+    }
+    if (ext != null) {
+      for (final p in [
+        '/api/system/deviceinfo',
+        '/api/system/HostInfo',
+        '/api/ntwk/WlanBasic?showpass=false',
+        '/api/ntwk/wlanradio',
+        '/api/ntwk/wandetect',
+        '/api/ntwk/repeaterinfo',
+        '/api/ntwk/meshinfo',
+        '/api/ntwk/wlan_channel',
+      ]) {
+        String body;
+        try {
+          body = jsonEncode(await ext!.getJson(p));
+        } catch (e) {
+          body = 'ERROR $e';
+        }
+        body = body.replaceAll(RegExp(r'"(WifiPass\w*|Password|KeyPassphrase|wpakey)"\s*:\s*"[^"]*"', caseSensitive: false), '"pass":"***"');
+        sb.writeln('\n===== EXT $p =====\n$body');
+      }
+    } else {
+      sb.writeln('\n(extender not connected)');
+    }
+    return sb.toString();
   }
 
   // ================= raw =================

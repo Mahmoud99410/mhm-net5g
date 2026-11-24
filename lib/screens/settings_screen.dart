@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
+import '../core/format.dart';
 import '../core/xml_utils.dart';
 import '../widgets/common.dart';
 
@@ -48,6 +49,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
             selected: {s.lang},
             onSelectionChanged: (v) => s.setLang(v.first),
           ),
+        ),
+        SectionCard(
+          title: s.t('وحدة قياس السرعة', 'Speed unit'),
+          icon: Icons.straighten_rounded,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            SegmentedButton<String>(
+              segments: [
+                for (final u in speedUnits) ButtonSegment(value: u, label: Text(u)),
+              ],
+              selected: {s.unit},
+              onSelectionChanged: (v) => s.setUnit(v.first),
+              showSelectedIcon: false,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              s.t('Mbps = ميغابت (المستخدم في عروض الشركات). MB/s = ميغابايت (سرعة التحميل الظاهرة في المتصفح). 1 MB/s = 8 Mbps.',
+                  'Mbps = megabits (ISP plans). MB/s = megabytes (download managers). 1 MB/s = 8 Mbps.'),
+              style: const TextStyle(color: AppColors.text2, fontSize: 12, height: 1.5),
+            ),
+          ]),
+        ),
+        SectionCard(
+          title: s.t('فحص السرعة التلقائي', 'Automatic speed test'),
+          icon: Icons.av_timer_rounded,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Wrap(spacing: 6, runSpacing: 6, children: [
+              for (final m in [0, 15, 30, 60, 180])
+                ChoiceChip(
+                  label: Text(m == 0
+                      ? s.t('متوقف', 'Off')
+                      : m < 60
+                          ? s.t('كل $m دقيقة', 'Every $m min')
+                          : s.t('كل ${m ~/ 60} ساعة', 'Every ${m ~/ 60} h')),
+                  selected: s.autoTestMin == m,
+                  onSelected: (_) => s.setAutoTest(m),
+                ),
+            ]),
+            const SizedBox(height: 8),
+            Text(
+              s.t('يقيس السرعة الفعلية التي يستقبلها الراوتر بشكل دوري ويعرضها في الرئيسية. كل فحص يستهلك تقريباً 70 ميغا.',
+                  'Periodically measures the real speed. Each test uses ~70 MB.'),
+              style: const TextStyle(color: AppColors.text2, fontSize: 12),
+            ),
+          ]),
+        ),
+        SectionCard(
+          title: s.t('تقرير التشخيص', 'Diagnostics report'),
+          icon: Icons.bug_report_rounded,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(
+              s.t('يجمع ردود الراوتر والمقوي في نص واحد (مع إخفاء IMEI وكلمات المرور) لتنسخه وترسله للمطور.',
+                  'Collects router & extender responses (secrets masked) to send to the developer.'),
+              style: const TextStyle(color: AppColors.text2, fontSize: 12, height: 1.5),
+            ),
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              onPressed: loadingRaw
+                  ? null
+                  : () async {
+                      setState(() => loadingRaw = true);
+                      final r = await s.buildDiagnostics();
+                      await Clipboard.setData(ClipboardData(text: r));
+                      if (!mounted) return;
+                      setState(() {
+                        rawOut = r;
+                        loadingRaw = false;
+                      });
+                      toast(context, s.t('تم نسخ التقرير — الصقه في المحادثة', 'Report copied'));
+                    },
+              icon: const Icon(Icons.copy_all_rounded),
+              label: Text(s.t('إنشاء ونسخ التقرير', 'Build & copy report')),
+            ),
+          ]),
         ),
         SectionCard(
           title: s.t('معلومات الراوتر', 'Router info'),
