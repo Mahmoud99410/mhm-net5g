@@ -49,7 +49,7 @@ jobs:
           channel: stable
           cache: true
       - name: Generate platform folders
-        run: flutter create . --platforms=windows --project-name mhm_net5g --org com.mhm
+        run: flutter create . --platforms=windows,android --project-name mhm_net5g --org com.mhm
       - name: Patch window title
         shell: pwsh
         run: |
