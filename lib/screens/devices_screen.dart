@@ -92,6 +92,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
           ),
         ]),
         const SizedBox(height: 12),
+        if (total > 0) _donut(s, total),
         if (!s.routerSupportsPerDeviceRate)
           NoteBox(s.t(
               'الراوتر لا يرسل سرعة كل جهاز بشكل منفصل، لذلك قد يبقى عدّاد الجيجات لكل جهاز صفراً. أرسل لي "تقرير التشخيص" من الإعدادات لأضيف الحقول الصحيحة لراوترك.',
@@ -138,6 +139,26 @@ class _DevicesScreenState extends State<DevicesScreen> {
         if (showOld)
           for (final mac in old) _deviceCard(s, mac, online[mac], total),
       ],
+    );
+  }
+
+  Widget _donut(AppState s, int total) {
+    final entries = s.deviceBytes.entries.where((e) => e.value > 0).toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final top = entries.take(5).toList();
+    final rest = entries.skip(5).fold<int>(0, (a, e) => a + e.value);
+    String nm(String mac) => s.rules[mac]?.name.isNotEmpty == true
+        ? s.rules[mac]!.name
+        : (s.deviceNames[mac] ?? mac);
+    return SectionCard(
+      title: s.t('من يستهلك الإنترنت؟', 'Who uses the internet?'),
+      icon: Icons.pie_chart_rounded,
+      child: Donut(
+        labels: [for (final e in top) nm(e.key), if (rest > 0) s.t('أخرى', 'Other')],
+        values: [for (final e in top) e.value.toDouble(), if (rest > 0) rest.toDouble()],
+        center: fmtBytes(total),
+        sub: s.t('هذه الدورة', 'this cycle'),
+      ),
     );
   }
 
@@ -374,27 +395,134 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   void _details(AppState s, String mac, String name, DeviceInfo? d) {
+    final nameCtrl = TextEditingController(text: name);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (c) => Directionality(
         textDirection: s.ar ? TextDirection.rtl : TextDirection.ltr,
-        child: DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.6,
-          builder: (c, sc) => ListView(controller: sc, padding: const EdgeInsets.all(20), children: [
-            Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 12),
-            InfoRow('MAC', mac),
-            InfoRow('IP', d?.ip ?? ''),
-            InfoRow(s.t('الاستهلاك بالدورة', 'Cycle usage'), fmtBytes(s.deviceBytes[mac] ?? 0)),
-            InfoRow(s.t('مدة الاتصال', 'Connected'), fmtDuration(d?.connectedSec ?? 0)),
-            const Divider(),
-            if (d != null)
-              for (final e in d.raw.entries)
-                if (e.value is String) InfoRow(e.key, e.value),
-          ]),
+        child: Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(c).viewInsets.bottom),
+          child: DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.75,
+            maxChildSize: 0.95,
+            builder: (c, sc) => StatefulBuilder(builder: (c, set) {
+              final rule = s.rules[mac];
+              final blocked = rule?.blocked ?? false;
+              return ListView(controller: sc, padding: const EdgeInsets.all(20), children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                        color: AppColors.border, borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+                Row(children: [
+                  CircleAvatar(
+                    radius: 26,
+                    backgroundColor: AppColors.cyan.withValues(alpha: 0.15),
+                    child: Icon(_icon(name), color: AppColors.cyan, size: 28),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(name,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                      Text(
+                          d?.active == true
+                              ? s.t('متصل الآن', 'Online')
+                              : s.t('غير متصل', 'Offline'),
+                          style: TextStyle(
+                              color: d?.active == true ? AppColors.green : AppColors.text2)),
+                    ]),
+                  ),
+                ]),
+                const SizedBox(height: 18),
+                TextField(
+                  controller: nameCtrl,
+                  decoration: InputDecoration(
+                    labelText: s.t('اسم الجهاز', 'Device name'),
+                    prefixIcon: const Icon(Icons.edit_rounded),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.check_rounded, color: AppColors.green),
+                      onPressed: () async {
+                        final v = nameCtrl.text.trim();
+                        if (v.isEmpty) return;
+                        s.ruleFor(mac).name = v;
+                        s.deviceNames[mac] = v;
+                        await s.saveRules();
+                        if (mounted) setState(() {});
+                        if (c.mounted) {
+                          FocusScope.of(c).unfocus();
+                          toast(context, s.t('تم حفظ الاسم ✓', 'Name saved ✓'));
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: (blocked ? AppColors.red : AppColors.green).withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: SwitchListTile(
+                    value: !blocked,
+                    activeThumbColor: AppColors.green,
+                    title: Text(blocked
+                        ? s.t('محظور من الإنترنت', 'Blocked')
+                        : s.t('مسموح له بالإنترنت', 'Allowed')),
+                    secondary: Icon(blocked ? Icons.block : Icons.check_circle_rounded,
+                        color: blocked ? AppColors.red : AppColors.green),
+                    onChanged: (allow) async {
+                      final err = await s.setBlocked(mac, !allow, name: nameCtrl.text.trim());
+                      set(() {});
+                      if (mounted) setState(() {});
+                      if (c.mounted && err != null) toast(context, err, error: true);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ListTile(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  tileColor: AppColors.surface2,
+                  leading: const Icon(Icons.schedule_rounded, color: AppColors.amber),
+                  title: Text(s.t('وقت الإنترنت (جدولة)', 'Internet schedule')),
+                  subtitle: Text(rule?.scheduleOn == true
+                      ? '${rule!.from} → ${rule.to}'
+                      : s.t('غير مفعّل', 'Off')),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () async {
+                    await _schedule(s, mac, nameCtrl.text.trim());
+                    set(() {});
+                  },
+                ),
+                const SizedBox(height: 16),
+                InfoRow('MAC', mac),
+                InfoRow('IP', d?.ip ?? ''),
+                InfoRow(s.t('الاتصال', 'Link'),
+                    d == null ? '' : (d.viaExtender ? s.t('عبر المقوي', 'via extender') : d.iface)),
+                InfoRow(s.t('الاستهلاك بالدورة', 'Cycle usage'), fmtBytes(s.deviceBytes[mac] ?? 0)),
+                InfoRow(s.t('مدة الاتصال', 'Connected'), fmtDuration(d?.connectedSec ?? 0)),
+                if (d != null)
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: Text(s.t('كل البيانات من الراوتر', 'All router data'),
+                        style: const TextStyle(fontSize: 13, color: AppColors.text2)),
+                    children: [
+                      for (final e in d.raw.entries)
+                        if (e.value is String) InfoRow(e.key, e.value),
+                    ],
+                  ),
+              ]);
+            }),
+          ),
         ),
       ),
     );

@@ -675,7 +675,8 @@ class MapNode {
   final String title;
   final String sub;
   final Color color;
-  const MapNode(this.icon, this.title, this.sub, this.color);
+  final VoidCallback? onTap;
+  const MapNode(this.icon, this.title, this.sub, this.color, {this.onTap});
 }
 
 /// Illustrated network topology: Tower -> Router -> Extender -> Devices.
@@ -732,7 +733,10 @@ class _NetworkMapState extends State<NetworkMap> with SingleTickerProviderStateM
     );
   }
 
-  Widget _node(MapNode n) => Column(mainAxisSize: MainAxisSize.min, children: [
+  Widget _node(MapNode n) => InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: n.onTap,
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
         Container(
           width: 56,
           height: 56,
@@ -755,7 +759,7 @@ class _NetworkMapState extends State<NetworkMap> with SingleTickerProviderStateM
         FittedBox(
           child: Text(n.sub, style: TextStyle(fontSize: 10, color: n.color)),
         ),
-      ]);
+      ]));
 }
 
 class _FlowPainter extends CustomPainter {
@@ -805,4 +809,246 @@ class Pill extends StatelessWidget {
               style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 12)),
         ]),
       );
+}
+
+
+/// Line chart for one or more series over time (NaN = gap).
+class TrendSeries {
+  final String name;
+  final List<double> values;
+  final Color color;
+  const TrendSeries(this.name, this.values, this.color);
+}
+
+class TrendChart extends StatelessWidget {
+  final List<TrendSeries> series;
+  final String unit;
+  final double height;
+  const TrendChart({super.key, required this.series, this.unit = '', this.height = 140});
+
+  @override
+  Widget build(BuildContext context) {
+    final all = [
+      for (final s in series)
+        for (final v in s.values)
+          if (!v.isNaN) v
+    ];
+    if (all.isEmpty) {
+      return SizedBox(
+        height: height,
+        child: const Center(child: Text('…', style: TextStyle(color: AppColors.text2))),
+      );
+    }
+    var mn = all.reduce(math.min), mx = all.reduce(math.max);
+    if (mx - mn < 4) {
+      mn -= 2;
+      mx += 2;
+    }
+    return Column(children: [
+      SizedBox(
+        height: height,
+        child: Row(children: [
+          SizedBox(
+            width: 38,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(mx.toStringAsFixed(0),
+                    style: const TextStyle(fontSize: 10, color: AppColors.text2)),
+                Text(((mx + mn) / 2).toStringAsFixed(0),
+                    style: const TextStyle(fontSize: 10, color: AppColors.text2)),
+                Text(mn.toStringAsFixed(0),
+                    style: const TextStyle(fontSize: 10, color: AppColors.text2)),
+              ],
+            ),
+          ),
+          Expanded(
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: _TrendPainter(series, mn, mx),
+            ),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 6),
+      Wrap(spacing: 14, children: [
+        for (final s in series)
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 12, height: 3, color: s.color),
+            const SizedBox(width: 4),
+            Text(
+                '${s.name}${s.values.isNotEmpty && !s.values.last.isNaN ? ': ${s.values.last.toStringAsFixed(0)} $unit' : ''}',
+                style: const TextStyle(fontSize: 11)),
+          ]),
+      ]),
+    ]);
+  }
+}
+
+class _TrendPainter extends CustomPainter {
+  final List<TrendSeries> series;
+  final double mn, mx;
+  _TrendPainter(this.series, this.mn, this.mx);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final grid = Paint()
+      ..color = AppColors.border
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 4; i++) {
+      final y = size.height * i / 4;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
+    }
+    for (final s in series) {
+      final v = s.values;
+      if (v.length < 2) continue;
+      final path = Path();
+      var started = false;
+      for (var i = 0; i < v.length; i++) {
+        if (v[i].isNaN) {
+          started = false;
+          continue;
+        }
+        final x = size.width * i / (v.length - 1);
+        final y = size.height - size.height * (v[i] - mn) / (mx - mn);
+        if (!started) {
+          path.moveTo(x, y);
+          started = true;
+        } else {
+          path.lineTo(x, y);
+        }
+      }
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = s.color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.2
+            ..strokeJoin = StrokeJoin.round);
+      if (!v.last.isNaN) {
+        final y = size.height - size.height * (v.last - mn) / (mx - mn);
+        canvas.drawCircle(Offset(size.width, y), 4, Paint()..color = s.color);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TrendPainter old) => true;
+}
+
+/// Donut chart with legend.
+class Donut extends StatelessWidget {
+  final List<String> labels;
+  final List<double> values;
+  final String center;
+  final String sub;
+  const Donut({
+    super.key,
+    required this.labels,
+    required this.values,
+    required this.center,
+    this.sub = '',
+  });
+
+  static const palette = [
+    AppColors.cyan,
+    AppColors.purple,
+    AppColors.green,
+    AppColors.amber,
+    AppColors.blue,
+    AppColors.red,
+    AppColors.text2,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final total = values.fold<double>(0, (a, b) => a + b);
+    return Row(children: [
+      SizedBox(
+        width: 140,
+        height: 140,
+        child: Stack(alignment: Alignment.center, children: [
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 900),
+            curve: Curves.easeOutCubic,
+            builder: (_, t, __) => CustomPaint(
+              size: const Size(140, 140),
+              painter: _DonutPainter(values, total, t),
+            ),
+          ),
+          Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(center, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+            if (sub.isNotEmpty)
+              Text(sub, style: const TextStyle(fontSize: 10, color: AppColors.text2)),
+          ]),
+        ]),
+      ),
+      const SizedBox(width: 14),
+      Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          for (var i = 0; i < labels.length; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(children: [
+                Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                      color: palette[i % palette.length], shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(labels[i],
+                      maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12)),
+                ),
+                Text(total > 0 ? '${(values[i] / total * 100).toStringAsFixed(0)}%' : '',
+                    style: const TextStyle(fontSize: 12, color: AppColors.text2)),
+              ]),
+            ),
+        ]),
+      ),
+    ]);
+  }
+}
+
+class _DonutPainter extends CustomPainter {
+  final List<double> values;
+  final double total;
+  final double t;
+  _DonutPainter(this.values, this.total, this.t);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Rect.fromLTWH(10, 10, size.width - 20, size.height - 20);
+    canvas.drawArc(
+        rect,
+        0,
+        math.pi * 2,
+        false,
+        Paint()
+          ..color = AppColors.surface2
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 18);
+    if (total <= 0) return;
+    var a = -math.pi / 2;
+    for (var i = 0; i < values.length; i++) {
+      final sweep = math.pi * 2 * values[i] / total * t;
+      canvas.drawArc(
+          rect,
+          a,
+          math.max(0.0, sweep - 0.03),
+          false,
+          Paint()
+            ..color = Donut.palette[i % Donut.palette.length]
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 18);
+      a += sweep;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DonutPainter old) => old.t != t || old.total != total;
 }

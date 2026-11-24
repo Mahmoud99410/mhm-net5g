@@ -113,6 +113,37 @@ class _SignalScreenState extends State<SignalScreen> {
                 ]),
         ),
 
+        // ---------- trends ----------
+        SectionCard(
+          title: s.t('تغيّر الإشارة مع الوقت', 'Signal over time'),
+          icon: Icons.show_chart_rounded,
+          child: Column(children: [
+            TrendChart(
+              unit: 'dBm',
+              series: [
+                TrendSeries('4G RSRP', s.rsrpHistory, AppColors.amber),
+                TrendSeries('5G RSRP', s.nrRsrpHistory, AppColors.cyan),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TrendChart(
+              unit: 'dB',
+              height: 110,
+              series: [
+                TrendSeries('4G SINR', s.sinrHistory, AppColors.purple),
+                TrendSeries('5G SINR', s.nrSinrHistory, AppColors.green),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              s.t('حرّك الراوتر ببطء في الغرفة وراقب الخطوط: المكان الذي ترتفع فيه الخطوط هو الأفضل.',
+                  'Move the router slowly and watch: where lines rise is the best spot.'),
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: AppColors.text2, fontSize: 12),
+            ),
+          ]),
+        ),
+
         // ---------- advisor ----------
         SectionCard(
           title: s.t('مستشار الإشارة — اقتراحات لك', 'Signal advisor'),

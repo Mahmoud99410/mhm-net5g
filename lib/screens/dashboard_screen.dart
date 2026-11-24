@@ -29,7 +29,9 @@ class DashboardScreen extends StatelessWidget {
     final next = nextCycleStart(DateTime.now(), s.resetDay);
     final daysLeft = next.difference(DateTime.now()).inDays + 1;
     final cap = s.capacityMbps;
-    final avail = s.lastTestDl > 0 ? s.lastTestDl : cap;
+    final avail = s.testing && s.testPhase == 'down'
+        ? s.liveTest
+        : (s.lastTestDl > 0 ? s.lastTestDl : cap);
     final maxBytes = mbpsToBytes(math.max(avail, 50));
     final advice = s.advice;
 
@@ -58,14 +60,18 @@ class DashboardScreen extends StatelessWidget {
                       Icons.cell_tower_rounded,
                       s.operatorName.isEmpty ? 'Zain' : s.operatorName,
                       s.has5G ? '5G + 4G' : '4G',
-                      s.has5G ? AppColors.green : AppColors.amber),
+                      s.has5G ? AppColors.green : AppColors.amber,
+                      onTap: () => s.openTab(1)),
                   MapNode(Icons.router_rounded, s.t('الراوتر', 'Router'),
-                      '${active.length - behindExt} ${s.t('جهاز', 'dev')}', AppColors.cyan),
+                      '${active.length - behindExt} ${s.t('جهاز', 'dev')}', AppColors.cyan,
+                      onTap: () => s.openTab(2)),
                   if (ext != null)
                     MapNode(Icons.wifi_tethering_rounded, s.t('المقوي', 'Extender'),
-                        '$behindExt ${s.t('جهاز', 'dev')}', AppColors.purple),
+                        '$behindExt ${s.t('جهاز', 'dev')}', AppColors.purple,
+                        onTap: () => s.openTab(6)),
                   MapNode(Icons.devices_other_rounded, s.t('الأجهزة', 'Devices'),
-                      '${active.length}', AppColors.blue),
+                      '${active.length} ${s.t('اضغط', 'tap')}', AppColors.blue,
+                      onTap: () => s.openTab(2)),
                 ],
                 links: [
                   s.carriers.map((c) => c.label).join('+'),
@@ -156,26 +162,70 @@ class DashboardScreen extends StatelessWidget {
                   : const Icon(Icons.play_arrow_rounded),
               label: Text(s.testing ? s.t('جاري', 'Running') : s.t('ابدأ', 'Start')),
             ),
-            child: Row(children: [
-              Expanded(
-                  child: _metric(
-                      s.t('تنزيل', 'Download'),
-                      s.testing && s.liveTest > 0
-                          ? fmtRate(mbpsToBytes(s.liveTest))
-                          : (s.lastTestDl > 0 ? fmtRate(mbpsToBytes(s.lastTestDl)) : '—'),
-                      Icons.download_rounded,
-                      AppColors.cyan)),
-              const SizedBox(width: 8),
-              Expanded(
-                  child: _metric(
-                      s.t('رفع', 'Upload'),
-                      s.lastTestUl > 0 ? fmtRate(mbpsToBytes(s.lastTestUl)) : '—',
-                      Icons.upload_rounded,
-                      AppColors.purple)),
-              const SizedBox(width: 8),
-              Expanded(
-                  child: _metric('Ping', s.lastPing <= 0 ? '—' : '${s.lastPing} ms',
-                      Icons.bolt_rounded, AppColors.amber)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              if (s.testing) ...[
+                LinearProgressIndicator(
+                  color: s.testPhase == 'up' ? AppColors.purple : AppColors.cyan,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  switch (s.testPhase) {
+                    'ping' => s.t('اختيار أقرب سيرفر...', 'Picking nearest server...'),
+                    'down' => s.t('قياس التنزيل...', 'Measuring download...'),
+                    'up' => s.t('قياس الرفع...', 'Measuring upload...'),
+                    _ => '',
+                  },
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: AppColors.text2, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+              ],
+              Row(children: [
+                Expanded(
+                    child: _metric(
+                        s.t('تنزيل', 'Download'),
+                        s.testing && s.testPhase == 'down'
+                            ? fmtRate(mbpsToBytes(s.liveTest))
+                            : (s.lastTestDl > 0 ? fmtRate(mbpsToBytes(s.lastTestDl)) : '—'),
+                        Icons.download_rounded,
+                        AppColors.cyan)),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: _metric(
+                        s.t('رفع', 'Upload'),
+                        s.testing && s.testPhase == 'up'
+                            ? fmtRate(mbpsToBytes(s.liveTestUl))
+                            : (s.lastTestUl > 0 ? fmtRate(mbpsToBytes(s.lastTestUl)) : '—'),
+                        Icons.upload_rounded,
+                        AppColors.purple)),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: _metric(
+                        'Ping',
+                        s.lastPing <= 0 ? '—' : '${s.lastPing} ms',
+                        Icons.bolt_rounded,
+                        AppColors.amber)),
+              ]),
+              if (s.testServer.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '${s.t('السيرفر', 'Server')}: ${s.testServer}  ·  Jitter ${s.lastJitter} ms',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: AppColors.text2, fontSize: 11),
+                ),
+              ],
+              if (s.testHistory.length > 1) ...[
+                const Divider(height: 24),
+                Text(s.t('نتائج الفحوصات السابقة (تنزيل)', 'Previous tests (download)'),
+                    style: const TextStyle(color: AppColors.text2, fontSize: 12)),
+                const SizedBox(height: 8),
+                BarChart(
+                  labels: [for (var i = 0; i < s.testHistory.length; i++) '${i + 1}'],
+                  values: [for (final v in s.testHistory) rateValue(mbpsToBytes(v))],
+                  fmt: (v) => '${v.toStringAsFixed(1)} ${s.unit}',
+                  height: 110,
+                ),
+              ],
             ]),
           ),
 

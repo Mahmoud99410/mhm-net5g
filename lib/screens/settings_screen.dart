@@ -249,7 +249,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const Center(
           child: Padding(
             padding: EdgeInsets.all(12),
-            child: Text('MHM NET5G v1.1.0', style: TextStyle(color: AppColors.text2)),
+            child: Text('MHM NET5G v1.2.0', style: TextStyle(color: AppColors.text2)),
           ),
         ),
       ],

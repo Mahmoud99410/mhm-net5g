@@ -67,6 +67,26 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
+  late final AppState _s;
+
+  @override
+  void initState() {
+    super.initState();
+    _s = context.read<AppState>();
+    _s.tabRequest.addListener(_onTab);
+  }
+
+  void _onTab() {
+    final i = _s.tabRequest.value;
+    if (i != null && mounted) setState(() => index = i);
+    _s.tabRequest.value = null;
+  }
+
+  @override
+  void dispose() {
+    _s.tabRequest.removeListener(_onTab);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

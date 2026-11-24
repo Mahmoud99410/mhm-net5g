@@ -33,6 +33,10 @@ jobs:
       - run: flutter pub get
       - run: dart run flutter_launcher_icons
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Use fixed signing key (so updates install over old versions)
+        run: |
+          mkdir -p ~/.android
+          cp ci/debug.keystore ~/.android/debug.keystore
       - run: flutter build apk --release
       - run: cp build/app/outputs/flutter-apk/app-release.apk MHM-NET5G.apk
       - uses: actions/upload-artifact@v4

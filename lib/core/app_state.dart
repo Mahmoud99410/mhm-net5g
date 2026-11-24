@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/extender_api.dart';
 import '../api/router_api.dart';
 import 'format.dart';
+import 'speedtest.dart';
 import 'xml_utils.dart';
 
 class DeviceInfo {
@@ -169,6 +170,11 @@ class AppState extends ChangeNotifier {
   List<Map<String, dynamic>> extHosts = [];
   final List<double> dlHistory = [];
   final List<double> ulHistory = [];
+  final List<double> testHistory = [];
+  final List<double> rsrpHistory = [];
+  final List<double> sinrHistory = [];
+  final List<double> nrRsrpHistory = [];
+  final List<double> nrSinrHistory = [];
 
   // ----- usage tracking -----
   Map<String, int> daily = {}; // day -> bytes
@@ -202,6 +208,10 @@ class AppState extends ChangeNotifier {
   bool scanning = false;
   String scanStatus = '';
   List<BandScanResult> scanResults = [];
+
+  /// Tab requested by a widget (e.g. tapping the devices counter).
+  final ValueNotifier<int?> tabRequest = ValueNotifier<int?>(null);
+  void openTab(int i) => tabRequest.value = i;
 
   bool get ar => lang == 'ar';
   String t(String a, String e) => ar ? a : e;
@@ -386,7 +396,19 @@ class AppState extends ChangeNotifier {
       _trackUsage(traffic.d('TotalDownload').toInt() + traffic.d('TotalUpload').toInt());
     });
     if (_tick % 2 == 0) {
-      await _safe(() async => signal = await api.signal());
+      await _safe(() async {
+        signal = await api.signal();
+        void push(List<double> l, String k) {
+          final v = signal.s(k).isEmpty ? double.nan : signal.d(k);
+          l.add(v);
+          if (l.length > 150) l.removeAt(0);
+        }
+
+        push(rsrpHistory, 'rsrp');
+        push(sinrHistory, 'sinr');
+        push(nrRsrpHistory, 'nrrsrp');
+        push(nrSinrHistory, 'nrsinr');
+      });
       await _safe(() async => status = await api.status());
     }
     notifyListeners();
@@ -808,7 +830,7 @@ class AppState extends ChangeNotifier {
             if (withSpeed) {
               scanStatus = t('قياس السرعة على B$b ...', 'Speed test on B$b ...');
               notifyListeners();
-              r.mbps = await measureDownload(bytes: 8000000);
+              r.mbps = await quickDownload();
             }
           }
         } catch (e) {
@@ -983,31 +1005,84 @@ class AppState extends ChangeNotifier {
   }
 
   // ================= speed test (shared) =================
+  String testPhase = ''; // ping / down / up
+  String testServer = '';
+  double liveTestUl = 0;
+  int lastJitter = 0;
+  SpeedServer? _server;
+  DateTime? _serverAt;
+
+  Future<SpeedServer> _bestServer(SpeedTester t) async {
+    if (_server != null &&
+        _serverAt != null &&
+        DateTime.now().difference(_serverAt!).inMinutes < 30) {
+      return _server!;
+    }
+    final list = await t.servers();
+    final (srv, ping, jit) = await t.pickServer(list);
+    _server = srv;
+    _serverAt = DateTime.now();
+    lastPing = ping;
+    lastJitter = jit;
+    return srv;
+  }
+
   Future<void> runSpeedTest() async {
     if (testing) return;
     testing = true;
     liveTest = 0;
+    liveTestUl = 0;
+    testPhase = 'ping';
     notifyListeners();
+    final tester = SpeedTester();
     try {
-      lastPing = await measurePing();
+      final hadServer = _server != null;
+      final srv = await _bestServer(tester);
+      if (hadServer) {
+        final (_, ping, jit) = await tester.pickServer([srv]);
+        lastPing = ping;
+        lastJitter = jit;
+      }
+      testServer = srv.name;
+      testPhase = 'down';
       notifyListeners();
-      lastTestDl = await measureDownload(
-          bytes: 60000000,
-          onProgress: (v) {
-            liveTest = v;
-            notifyListeners();
-          });
+      lastTestDl = await tester.download(srv, (v) {
+        liveTest = v;
+        notifyListeners();
+      });
+      liveTest = lastTestDl;
+      testPhase = 'up';
       notifyListeners();
-      lastTestUl = await measureUpload(bytes: 10000000);
+      lastTestUl = await tester.upload(srv, (v) {
+        liveTestUl = v;
+        notifyListeners();
+      });
+      liveTestUl = lastTestUl;
       final n = DateTime.now();
       lastTestAt =
           '${dayKey(n)} ${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
+      testHistory.add(lastTestDl);
+      if (testHistory.length > 20) testHistory.removeAt(0);
       await _prefs?.setDouble('lastTestDl', lastTestDl);
       await _prefs?.setDouble('lastTestUl', lastTestUl);
       await _prefs?.setString('lastTestAt', lastTestAt);
+    } catch (e) {
+      log('speedtest: $e');
     } finally {
       testing = false;
+      testPhase = '';
       notifyListeners();
+    }
+  }
+
+  /// Short download test used by the band finder.
+  Future<double> quickDownload() async {
+    final t = SpeedTester(downTime: const Duration(milliseconds: 3500));
+    try {
+      final srv = await _bestServer(t);
+      return await t.download(srv, (_) {});
+    } catch (_) {
+      return 0;
     }
   }
 
